@@ -99,3 +99,25 @@ To force a re-fetch, delete the relevant file under `backend/data/cache/`.
 Edit `backend/tags_config.py`. Each tag is `{label, key, value, filter_key?,
 filter_value?}`. `value="*"` means "any value for this key". The frontend
 rebuilds the checkbox tree from this config.
+
+## Static build (GitHub Pages deployment)
+
+For deployment without a server, see `static/` — a parallel pipeline that
+pre-computes per-city bundles for a curated set of cities and ships a pure
+HTML/JS site you can serve from GitHub Pages (or any static host).
+
+```
+python -m static.build
+# writes static/site/data/<city>.json and static/site/data/config.json
+# point GitHub Pages at static/site/
+```
+
+See `static/README.md` for details.
+
+## Author
+
+Built by [Cédric Colas](https://cedriccolas.com). Data from
+[OpenStreetMap](https://www.openstreetmap.org). Polygon sources: OSM
+`admin_level` relations for most cities; [Chicago Open Data](https://data.cityofchicago.org)
+for Chicago Community Areas.
+

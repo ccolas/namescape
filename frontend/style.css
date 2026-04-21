@@ -726,3 +726,19 @@ input[type="checkbox"]:indeterminate::after {
 .leaflet-tooltip.district-tooltip::before { display: none; }
 .leaflet-container { font-family: var(--font); background: #e6eaf1; }
 .leaflet-control-attribution { font-size: 10px; }
+
+/* credit footer */
+.credit {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  text-align: center;
+  line-height: 1.5;
+}
+.credit a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.credit a:hover { text-decoration: underline; }
