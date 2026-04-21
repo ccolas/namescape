@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs (if anyone tries one anyway)
+.venv/
+venv/
+env/
+
+# Generated / fetched data
+backend/data/cache/
+backend/data/istanbul_districts.geojson
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+.claude
