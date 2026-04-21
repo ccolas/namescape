@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run the Istanbul Voices server.
-# Assumes the `voices` conda env has already been set up and deps installed.
+# Run the Namescape server.
+# Assumes your conda env with deps installed is already active (see README).
 set -euo pipefail
 cd "$(dirname "$0")"
 

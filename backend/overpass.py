@@ -16,7 +16,7 @@ import httpx
 log = logging.getLogger(__name__)
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-USER_AGENT = "IstanbulVoices/0.1 (research prototype; contact ccolas@mit.edu)"
+USER_AGENT = "Namescape/0.1 (research prototype; contact ccolas@mit.edu)"
 ISTANBUL_AREA_ID = 3600223474  # relation 223474 -> area
 
 CACHE_DIR = Path(__file__).parent / "data" / "cache"

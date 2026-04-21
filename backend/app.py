@@ -17,11 +17,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-log = logging.getLogger("voices")
+log = logging.getLogger("namescape")
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
-app = FastAPI(title="Istanbul Voices")
+app = FastAPI(title="Namescape")
 
 
 class TagSpec(BaseModel):

@@ -1,9 +1,13 @@
-# Istanbul Voices
+# Namescape
+
+*Geospatial linguistic landscape analysis from OpenStreetMap points of interest.*
 
 A small web app that shows, for a chosen set of location types (shops,
 places of worship, government offices, …) and a list of keywords, the
 **fraction of locations whose name matches any keyword** — mapped per
-Istanbul district (ilçe) with a configurable color palette.
+administrative district with a configurable color palette. Currently
+wired to Istanbul's 39 ilçe; the same pipeline extends to any city with
+administrative boundaries in OSM.
 
 Data comes from **OpenStreetMap** via the Overpass API. No API key, free.
 
@@ -26,17 +30,21 @@ Data comes from **OpenStreetMap** via the Overpass API. No API key, free.
 
 ## Install
 
-In your `voices` conda env:
+Any Python 3.10+ environment works. For example, a dedicated conda env:
 
 ```
+conda create -n namescape python=3.11
+conda activate namescape
 pip install 'fastapi>=0.110' 'uvicorn[standard]>=0.27' 'httpx>=0.27' \
             'shapely>=2.0' 'snowballstemmer>=2.2' 'osm2geojson>=0.2.4'
 ```
 
+(Env name is arbitrary — whatever you already have works.)
+
 ## Run
 
 ```
-conda activate voices
+conda activate namescape   # or whatever env has the deps
 ./run.sh
 ```
 

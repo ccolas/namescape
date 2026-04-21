@@ -23,7 +23,7 @@ out skel qt;
 """.strip()
 
 
-USER_AGENT = "IstanbulVoices/0.1 (research prototype; contact ccolas@mit.edu)"
+USER_AGENT = "Namescape/0.1 (research prototype; contact ccolas@mit.edu)"
 
 
 def fetch() -> None:

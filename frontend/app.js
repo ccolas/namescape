@@ -1,4 +1,4 @@
-// Istanbul Voices — frontend
+// Namescape — frontend
 
 let map;
 let districtsLayer;
@@ -582,7 +582,7 @@ function downloadSummaryCSV() {
     rows.push([name, s.count, s.matches, s.fraction.toFixed(6)]);
   }
   const csv = rows.map(r => r.map(csvEscape).join(",")).join("\n");
-  downloadBlob(csv, "istanbul_voices_summary.csv");
+  downloadBlob(csv, "namescape_summary.csv");
 }
 
 function downloadMatchesCSV() {
@@ -606,7 +606,7 @@ function downloadMatchesCSV() {
     }
   }
   const csv = rows.map(r => r.map(csvEscape).join(",")).join("\n");
-  downloadBlob(csv, "istanbul_voices_matches.csv");
+  downloadBlob(csv, "namescape_matches.csv");
 }
 
 // ---------- query ----------
