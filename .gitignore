@@ -14,9 +14,17 @@ __pycache__/
 venv/
 env/
 
-# Generated / fetched data
-backend/data/cache/
-backend/data/istanbul_districts.geojson
+# DuckDB extensions (regenerable; project-local cache used by the build)
+.duckdb_ext/
+
+# Per-source fetch cache (Overpass / Overture / FSQ raw responses).
+# Lets `python -m static.build --force` skip the slow re-fetches when
+# only the merge / mapping logic changed.
+.fetch_cache/
+
+# City bundles: ship only the gzipped ones. Uncompressed JSON siblings are
+# 100+ MB and nothing reads them.
+static/site/data/*.json
 
 # Editor / OS
 .DS_Store

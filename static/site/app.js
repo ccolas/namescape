@@ -16,6 +16,8 @@ let currentCityId = null;
 let currentCityBundle = null;   // { meta, districts, elements }
 let currentPalette = "Viridis";
 let currentScale = "auto";
+let currentMetric = "fraction";   // "fraction" or "count"
+let minMatches = 0;                // grey out districts with fewer matches than this
 let lastResult = null;
 let sortKey = "fraction";
 let sortDir = "desc";
@@ -63,6 +65,17 @@ async function init() {
       applyStyling(); renderLegend(); renderTable();
     });
   });
+  document.querySelectorAll('input[name="metric"]').forEach(el => {
+    el.addEventListener("change", () => {
+      currentMetric = el.value;
+      applyStyling(); renderLegend(); renderTable();
+    });
+  });
+  document.getElementById("min-matches").addEventListener("input", e => {
+    const v = parseInt(e.target.value, 10);
+    minMatches = Number.isFinite(v) && v >= 0 ? v : 0;
+    applyStyling(); renderLegend(); renderTable();
+  });
   document.querySelectorAll('input[name="mode"]').forEach(el => el.addEventListener("change", setModeHint));
   document.getElementById("run").addEventListener("click", runQuery);
   document.getElementById("select-all").addEventListener("click", () => toggleAll(true));
@@ -109,13 +122,9 @@ async function loadCity(cityId) {
   document.getElementById("city-meta").textContent =
     `${meta.n_districts} ${meta.subdivision}${meta.n_districts > 1 ? "s" : ""} · ${meta.n_elements.toLocaleString()} POIs · stemmer: ${meta.stemmer_language}`;
 
-  showLoadingOverlay(`Loading ${meta.label}… (~${estimateMB(meta.n_elements)} MB)`);
+  showLoadingOverlay(`Loading ${meta.label}…`);
   try {
-    const bundle = await fetch(`data/${cityId}.json`).then(r => {
-      if (!r.ok) throw new Error(`data/${cityId}.json: HTTP ${r.status}`);
-      return r.json();
-    });
-    currentCityBundle = bundle;
+    currentCityBundle = await fetchCityBundle(cityId);
   } catch (e) {
     hideLoadingOverlay();
     setStatus(`Failed to load city: ${e.message}`, "error");
@@ -133,12 +142,32 @@ async function loadCity(cityId) {
   renderDistrictLayer(currentCityBundle.districts);
 
   hideLoadingOverlay();
+  refreshTagCounts();
   setStatus(`Ready. ${currentCityBundle.elements.length.toLocaleString()} locations in ${currentCityBundle.districts.features.length} ${currentCityBundle.meta.subdivision}s.`);
 }
 
-function estimateMB(nElements) {
-  // Rough — used only for UX message.
-  return Math.max(1, Math.round(nElements * 0.0004));
+async function fetchCityBundle(cityId) {
+  // Prefer the gzipped bundle. Modern browsers decompress via DecompressionStream;
+  // if the response headers say Content-Encoding: gzip the browser already
+  // decompressed transparently and we can call .json() directly.
+  const gzPath = `data/${cityId}.json.gz`;
+  const r = await fetch(gzPath);
+  if (r.ok) {
+    if ((r.headers.get("content-encoding") || "").includes("gzip")) {
+      return await r.json();
+    }
+    if (typeof DecompressionStream !== "undefined") {
+      const ds = new DecompressionStream("gzip");
+      const stream = r.body.pipeThrough(ds);
+      const text = await new Response(stream).text();
+      return JSON.parse(text);
+    }
+    throw new Error("Browser lacks DecompressionStream — please use a modern browser");
+  }
+  // Legacy fallback: uncompressed bundle.
+  const fallback = await fetch(`data/${cityId}.json`);
+  if (!fallback.ok) throw new Error(`bundle not found (HTTP ${r.status} for .gz, ${fallback.status} for .json)`);
+  return await fallback.json();
 }
 
 // ---------------- palettes / tags / map ----------------
@@ -161,6 +190,7 @@ function renderTags(cats) {
   for (const cat of cats) {
     const catDiv = document.createElement("div");
     catDiv.className = "category";
+    catDiv.dataset.catId = cat.id;
     const header = document.createElement("div");
     header.className = "cat-header";
     const chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -184,13 +214,13 @@ function renderTags(cats) {
     for (const tag of cat.tags) {
       const row = document.createElement("label");
       row.className = "tag-row";
-      if (tag.value === "*") row.classList.add("master");
       const cb = document.createElement("input");
       cb.type = "checkbox"; cb.className = "tag-cb";
       cb.dataset.tag = JSON.stringify(tag);
       cb.dataset.specId = specId(tag);
       row.appendChild(cb);
-      const sp = document.createElement("span"); sp.textContent = tag.label; row.appendChild(sp);
+      const sp = document.createElement("span"); sp.className = "tag-label"; sp.textContent = tag.label; row.appendChild(sp);
+      const tagN = document.createElement("span"); tagN.className = "tag-count"; row.appendChild(tagN);
       list.appendChild(row);
       boxes.push(cb);
       if (tag.value === "*") masterBox = cb;
@@ -227,13 +257,56 @@ function specId(tag) {
   return sid;
 }
 
+function refreshTagCounts() {
+  if (!currentCityBundle) return;
+  const counts = new Map();
+  for (const el of currentCityBundle.elements) {
+    counts.set(el.s, (counts.get(el.s) || 0) + 1);
+  }
+  // Per-tag counts (next to the tag label).
+  document.querySelectorAll("#tag-tree .tag-row").forEach(row => {
+    const cb = row.querySelector(".tag-cb");
+    const span = row.querySelector(".tag-count");
+    if (!cb || !span) return;
+    const n = counts.get(cb.dataset.specId) || 0;
+    span.textContent = n ? ` (${n.toLocaleString()})` : " (0)";
+    span.classList.toggle("zero", n === 0);
+  });
+  // Per-category total (sum of its tags' counts) goes in the header counter
+  // alongside the existing "checked/total" indicator.
+  document.querySelectorAll("#tag-tree .category").forEach(catDiv => {
+    const tagBoxes = catDiv.querySelectorAll(".tag-cb");
+    let total = 0;
+    tagBoxes.forEach(cb => { total += counts.get(cb.dataset.specId) || 0; });
+    const headerCount = catDiv.querySelector(".cat-count");
+    if (headerCount && !headerCount.classList.contains("active")) {
+      headerCount.textContent = `${tagBoxes.length} · ${total.toLocaleString()}`;
+    }
+    catDiv.dataset.totalCount = total;
+  });
+}
+
 function toggleAll(on) {
-  document.querySelectorAll("#tag-tree .tag-cb").forEach(cb => { cb.checked = on; });
-  document.querySelectorAll("#tag-tree .cat-cb").forEach(cb => { cb.checked = on; cb.indeterminate = false; });
-  document.querySelectorAll("#tag-tree .cat-count").forEach(c => {
-    const list = c.closest(".category").querySelectorAll(".tag-cb");
-    c.textContent = on ? `${list.length}/${list.length}` : list.length;
-    c.classList.toggle("active", on);
+  // Skip the "Uncategorized" super-category — its records are intentionally
+  // off by default and should stay opt-in.
+  document.querySelectorAll("#tag-tree .category").forEach(catDiv => {
+    if (catDiv.dataset.catId === "external_other") {
+      // Always reset its in-tree state on a global toggle so the user
+      // doesn't end up in a half-checked state by surprise.
+      catDiv.querySelectorAll(".tag-cb").forEach(cb => { cb.checked = false; });
+      const headerCb = catDiv.querySelector(".cat-cb");
+      if (headerCb) { headerCb.checked = false; headerCb.indeterminate = false; }
+      return;
+    }
+    catDiv.querySelectorAll(".tag-cb").forEach(cb => { cb.checked = on; });
+    const headerCb = catDiv.querySelector(".cat-cb");
+    if (headerCb) { headerCb.checked = on; headerCb.indeterminate = false; }
+    const c = catDiv.querySelector(".cat-count");
+    if (c) {
+      const list = catDiv.querySelectorAll(".tag-cb");
+      c.textContent = on ? `${list.length}/${list.length}` : list.length;
+      c.classList.toggle("active", on);
+    }
   });
 }
 
@@ -284,19 +357,32 @@ function sampleStops(stops, t) {
   if (i >= stops.length - 1) return stops[stops.length - 1];
   return lerpHex(stops[i], stops[i+1], frac);
 }
+function metricValue(s) {
+  return currentMetric === "fraction" ? s.fraction : s.matches;
+}
+function isIncluded(s) {
+  return s && s.count > 0 && s.matches >= minMatches;
+}
 function scaleMax() {
-  if (currentScale === "absolute") return 1.0;
-  if (!lastResult) return 1.0;
+  const fracDefault = currentMetric === "fraction" ? 1.0 : 1;
+  if (currentMetric === "fraction" && currentScale === "absolute") return 1.0;
+  if (!lastResult) return fracDefault;
   let mx = 0;
   for (const s of Object.values(lastResult.per_district)) {
-    if (s.count > 0 && s.fraction > mx) mx = s.fraction;
+    if (!isIncluded(s)) continue;
+    const v = metricValue(s);
+    if (v > mx) mx = v;
   }
-  return mx > 0 ? mx : 1.0;
+  return mx > 0 ? mx : fracDefault;
 }
-function colorFor(fraction) {
+function colorFor(s) {
   const mx = scaleMax();
-  return sampleStops(paletteStops(), mx > 0 ? fraction / mx : 0);
+  return sampleStops(paletteStops(), mx > 0 ? metricValue(s) / mx : 0);
 }
+
+// Display fractions in per-mille (‰) — much more readable than % for the
+// kind of small ratios we see here (a few matches out of tens of thousands).
+function fmtFrac(fraction) { return `${(fraction * 1000).toFixed(2)}‰`; }
 
 // ---------------- matching (in-browser) ----------------
 
@@ -326,7 +412,7 @@ function buildMatcher(keywords, mode) {
   if (mode === "substring") {
     const nk = kws.map(normalize);
     return (el) => {
-      const n = el._nn || (el._nn = normalize(el.n));
+      const n = el._nn || (el._nn = normalize(el.ns ? `${el.n} | ${el.ns}` : el.n));
       return nk.some(k => n.indexOf(k) !== -1);
     };
   }
@@ -356,7 +442,10 @@ function buildMatcher(keywords, mode) {
   if (mode === "regex") {
     const regs = [];
     for (const k of kws) { try { regs.push(new RegExp(k, "i")); } catch {} }
-    return (el) => regs.some(r => r.test(el.n));
+    return (el) => {
+      const hay = el.ns ? `${el.n} | ${el.ns}` : el.n;
+      return regs.some(r => r.test(hay));
+    };
   }
   return () => false;
 }
@@ -439,11 +528,11 @@ function runQuery() {
 }
 
 function renderSummaryStats(s) {
-  const overall = s.elements > 0 ? ((s.matches / s.elements) * 100).toFixed(1) : "0.0";
+  const overall = s.elements > 0 ? fmtFrac(s.matches / s.elements) : fmtFrac(0);
   document.getElementById("summary-stats").innerHTML = `
     <div class="stat-cell"><span class="stat-value">${s.elements.toLocaleString()}</span><span class="stat-label">locations</span></div>
     <div class="stat-cell"><span class="stat-value">${s.matches.toLocaleString()}</span><span class="stat-label">matches</span></div>
-    <div class="stat-cell"><span class="stat-value">${overall}%</span><span class="stat-label">overall</span></div>
+    <div class="stat-cell"><span class="stat-value">${overall}</span><span class="stat-label">overall</span></div>
   `;
 }
 
@@ -457,7 +546,7 @@ function applyStyling() {
     const s = per[name];
     const active = selectedDistrict === name;
     let style;
-    if (!s || s.count === 0) {
+    if (!isIncluded(s)) {
       style = {
         color: active ? "#1a1e2c" : "#8a92a5",
         weight: active ? 2.5 : 1,
@@ -469,15 +558,21 @@ function applyStyling() {
       style = {
         color: active ? "#1a1e2c" : "#3a4050",
         weight: active ? 2.5 : 0.8,
-        fillColor: colorFor(s.fraction),
+        fillColor: colorFor(s),
         fillOpacity: 0.78,
         dashArray: null,
       };
     }
     layer.setStyle(style);
-    const tt = s && s.count > 0
-      ? `<b>${name}</b><br/>${s.matches} / ${s.count} = ${(s.fraction * 100).toFixed(1)}%`
-      : `<b>${name}</b><br/><span style="opacity:0.7">no locations</span>`;
+    let tt;
+    if (!s || s.count === 0) {
+      tt = `<b>${name}</b><br/><span style="opacity:0.7">no locations</span>`;
+    } else {
+      const base = `<b>${name}</b><br/>${s.matches} / ${s.count} = ${fmtFrac(s.fraction)}`;
+      tt = (s.matches < minMatches)
+        ? `${base}<br/><span style="opacity:0.7">below threshold (${minMatches})</span>`
+        : base;
+    }
     layer.unbindTooltip();
     layer.bindTooltip(tt, { sticky: true, className: "district-tooltip" });
   });
@@ -488,18 +583,25 @@ function renderLegend() {
   const stops = paletteStops();
   const grad = `linear-gradient(to right, ${stops.join(", ")})`;
   const mx = scaleMax();
-  const scaleLabel = currentScale === "auto" ? " · auto-scaled" : "";
+  const isFrac = currentMetric === "fraction";
+  const scaleLabel = (isFrac && currentScale === "auto") || (!isFrac)
+    ? " · auto-scaled" : "";
+  const title = isFrac ? "Fraction matching" : "Total matches";
+  const fmt = (v) => isFrac ? fmtFrac(v) : Math.round(v).toLocaleString();
+  const nodataLabel = minMatches > 0
+    ? `no locations · or fewer than ${minMatches} matches`
+    : "no locations in district";
   el.innerHTML = `
-    <div class="legend-title">Fraction matching${scaleLabel}</div>
+    <div class="legend-title">${title}${scaleLabel}</div>
     <div class="legend-bar" style="background:${grad}"></div>
     <div class="legend-scale">
-      <span>0%</span>
-      <span>${(mx * 50).toFixed(1)}%</span>
-      <span>${(mx * 100).toFixed(1)}%</span>
+      <span>${isFrac ? fmtFrac(0) : "0"}</span>
+      <span>${fmt(mx * 0.5)}</span>
+      <span>${fmt(mx)}</span>
     </div>
     <div class="legend-nodata">
       <div class="legend-nodata-swatch"></div>
-      <span>no locations in district</span>
+      <span>${nodataLabel}</span>
     </div>
   `;
 }
@@ -522,11 +624,13 @@ function renderTable() {
   });
   tbody.innerHTML = rows.map(r => {
     const noData = r.count === 0;
-    const pct = noData ? "—" : `${(r.fraction * 100).toFixed(1)}%`;
-    const color = noData ? "#d9dde7" : colorFor(r.fraction);
-    const bar = noData ? 0 : Math.max(2, r.fraction / Math.max(scaleMax(), 1e-9) * 100);
+    const excluded = !noData && r.matches < minMatches;
+    const greyed = noData || excluded;
+    const pct = noData ? "—" : fmtFrac(r.fraction);
+    const color = greyed ? "#d9dde7" : colorFor(r);
+    const bar = greyed ? 0 : Math.max(2, metricValue(r) / Math.max(scaleMax(), 1e-9) * 100);
     const activeCls = selectedDistrict === r.name ? " active" : "";
-    const ndCls = noData ? " nodata" : "";
+    const ndCls = greyed ? " nodata" : "";
     return `<tr class="row${activeCls}${ndCls}" data-name="${esc(r.name)}">
       <td>${esc(r.name)}</td>
       <td class="num">${r.matches}</td>
@@ -554,7 +658,9 @@ const esc = (x) => (x == null ? "" : String(x).replace(/[&<>"]/g, c => ({"&":"&a
 function osmUrl(m) {
   if (!m || !m.otype || !m.oid) return null;
   const typeMap = { n: "node", w: "way", r: "relation" };
-  return `https://www.openstreetmap.org/${typeMap[m.otype] || "node"}/${m.oid}`;
+  const t = typeMap[m.otype];
+  if (!t) return null;  // 'x' = external (Overture/FSQ): no OSM link
+  return `https://www.openstreetmap.org/${t}/${m.oid}`;
 }
 
 function groupByCategory(matches) {
@@ -578,19 +684,43 @@ function matchItemHtml(m) {
   const nameHtml = url
     ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(m.n)}</a>`
     : `<span>${esc(m.n)}</span>`;
-  return `<li class="match-item" data-match="${payload}">${nameHtml}</li>`;
+  // Show alt names inline when present — these are part of the search
+  // surface, so the user can see why a record matched even if its
+  // primary display name doesn't contain the keyword.
+  const altHtml = m.ns
+    ? `<span class="match-alt"> · ${esc(m.ns)}</span>`
+    : "";
+  return `<li class="match-item" data-match="${payload}">${nameHtml}${altHtml}</li>`;
 }
 
 let _tooltipEl = null;
+let _hoverTimer = null;
+
 function tooltipEl() {
   if (_tooltipEl) return _tooltipEl;
   _tooltipEl = document.createElement("div");
   _tooltipEl.className = "match-tooltip hidden";
+  // Keep the tooltip open while the cursor is on it, so users can click links.
+  _tooltipEl.addEventListener("mouseenter", cancelHide);
+  _tooltipEl.addEventListener("mouseleave", scheduleHide);
   document.body.appendChild(_tooltipEl);
   return _tooltipEl;
 }
-function hideTooltip() { tooltipEl().classList.add("hidden"); }
-function renderTooltip(m, x, y) {
+
+function cancelHide() {
+  if (_hoverTimer) { clearTimeout(_hoverTimer); _hoverTimer = null; }
+}
+function scheduleHide() {
+  cancelHide();
+  _hoverTimer = setTimeout(() => {
+    if (_tooltipEl) {
+      _tooltipEl.classList.add("hidden");
+      _tooltipEl.dataset.for = "";
+    }
+  }, 180);
+}
+
+function renderTooltipForItem(m, itemEl) {
   const el = tooltipEl();
   const rows = [];
   rows.push(`<div class="tt-name">${esc(m.n)}</div>`);
@@ -613,40 +743,84 @@ function renderTooltip(m, x, y) {
   if (url) rows.push(`<div class="tt-meta"><a href="${esc(url)}" target="_blank" rel="noopener">open on OSM ↗</a></div>`);
   el.innerHTML = rows.join("");
   el.classList.remove("hidden");
-  positionTooltip(el, x, y);
+  positionBesideItem(el, itemEl);
 }
-function positionTooltip(el, x, y) {
-  const pad = 12;
-  const r = el.getBoundingClientRect();
-  let nx = x + pad, ny = y + pad;
-  if (nx + r.width > window.innerWidth - 10) nx = x - r.width - pad;
-  if (ny + r.height > window.innerHeight - 10) ny = y - r.height - pad;
+
+function positionBesideItem(el, itemEl) {
+  // Place to the right of the item; flip to the left if it would overflow.
+  // Render briefly off-screen first to measure.
+  el.style.left = "-9999px";
+  el.style.top = "-9999px";
+  const itemRect = itemEl.getBoundingClientRect();
+  const ttRect = el.getBoundingClientRect();
+  const pad = 8;
+  let nx = itemRect.right + pad;
+  let ny = itemRect.top;
+  if (nx + ttRect.width > window.innerWidth - 10) {
+    nx = itemRect.left - ttRect.width - pad;
+  }
+  if (ny + ttRect.height > window.innerHeight - 10) {
+    ny = Math.max(10, window.innerHeight - ttRect.height - 10);
+  }
   el.style.left = Math.max(4, nx) + "px";
   el.style.top = Math.max(4, ny) + "px";
 }
+
 function bindMatchHover(root) {
-  let current = null;
   root.addEventListener("mouseover", (e) => {
     const li = e.target.closest(".match-item");
-    if (!li || li === current) return;
-    current = li;
+    if (!li) return;
+    const el = tooltipEl();
+    cancelHide();
+    // Avoid flicker: if we're already showing this item's tooltip, do nothing.
+    if (el.dataset.for === li.dataset.match) return;
     try {
       const m = JSON.parse(decodeURIComponent(li.dataset.match));
-      renderTooltip(m, e.clientX, e.clientY);
+      renderTooltipForItem(m, li);
+      el.dataset.for = li.dataset.match;
     } catch {}
-  });
-  root.addEventListener("mousemove", (e) => {
-    if (!current) return;
-    const el = tooltipEl();
-    if (!el.classList.contains("hidden")) positionTooltip(el, e.clientX, e.clientY);
   });
   root.addEventListener("mouseout", (e) => {
     const li = e.target.closest(".match-item");
     if (!li) return;
-    if (e.relatedTarget && li.contains(e.relatedTarget)) return;
-    current = null;
-    hideTooltip();
+    // If cursor is moving into the tooltip, don't hide.
+    if (e.relatedTarget && _tooltipEl && _tooltipEl.contains(e.relatedTarget)) return;
+    scheduleHide();
   });
+  root.addEventListener("click", (e) => {
+    // Don't hijack clicks on the embedded OSM link.
+    if (e.target.closest("a")) return;
+    const li = e.target.closest(".match-item");
+    if (!li) return;
+    try {
+      const m = JSON.parse(decodeURIComponent(li.dataset.match));
+      showMatchOnMap(m);
+    } catch {}
+  });
+}
+
+let _matchMarker = null;
+
+function showMatchOnMap(m) {
+  if (!map || typeof m.lat !== "number" || typeof m.lon !== "number") return;
+  if (_matchMarker) { map.removeLayer(_matchMarker); _matchMarker = null; }
+  _matchMarker = L.circleMarker([m.lat, m.lon], {
+    radius: 7,
+    color: "#1a1e2c",
+    weight: 2,
+    fillColor: "#ffd24a",
+    fillOpacity: 0.95,
+    pane: "markerPane",
+  }).addTo(map);
+  const altLine = m.ns ? `<div class="popup-alt">${esc(m.ns)}</div>` : "";
+  _matchMarker.bindPopup(
+    `<div class="popup-name">${esc(m.n)}</div>` +
+    `<div class="popup-cat">${esc(m.c || "")}</div>` +
+    altLine,
+    { closeButton: true, autoClose: false }
+  ).openPopup();
+  // Pan (don't zoom) so the user keeps their context.
+  map.panTo([m.lat, m.lon], { animate: true });
 }
 
 function showDistrictPanel(name) {
@@ -658,7 +832,7 @@ function showDistrictPanel(name) {
       <h2>${esc(name)}</h2>
       <div style="color:var(--text-soft);margin-top:8px">Run a query to see statistics.</div>`;
   } else {
-    const pct = (s.fraction * 100).toFixed(1);
+    const pct = fmtFrac(s.fraction);
     const groups = groupByCategory(s.match_examples || []);
     const groupsHtml = groups.map(g => {
       const shown = g.items.slice(0, 150);
@@ -675,7 +849,7 @@ function showDistrictPanel(name) {
       <span class="close" id="close-panel">×</span>
       <h2>${esc(name)}</h2>
       <div class="headline">
-        <span class="headline-frac">${pct}%</span>
+        <span class="headline-frac">${pct}</span>
         <span class="headline-sub">${s.matches} of ${s.count} locations</span>
       </div>
       ${groupsHtml ? `<h3>Matching names (${s.matches})</h3>${groupsHtml}` : "<h3>No matches in this district</h3>"}
@@ -684,13 +858,24 @@ function showDistrictPanel(name) {
     bindMatchHover(panel);
   }
   panel.classList.remove("hidden");
-  document.getElementById("close-panel").addEventListener("click", () => {
-    panel.classList.add("hidden");
-    selectedDistrict = null;
-    applyStyling();
-    renderTable();
-  });
 }
+
+// Panel close + per-match clicks are delegated on the panel itself so we
+// don't depend on re-binding after each innerHTML replace.
+(function bindPanelDelegation() {
+  const panel = document.getElementById("district-panel");
+  if (!panel || panel.dataset.boundClose) return;
+  panel.dataset.boundClose = "1";
+  panel.addEventListener("click", (e) => {
+    if (e.target.closest("#close-panel")) {
+      panel.classList.add("hidden");
+      selectedDistrict = null;
+      if (_matchMarker) { map.removeLayer(_matchMarker); _matchMarker = null; }
+      applyStyling();
+      renderTable();
+    }
+  });
+})();
 
 // ---------------- CSV ----------------
 
@@ -720,20 +905,27 @@ function downloadSummaryCSV() {
 function downloadMatchesCSV() {
   if (!lastResult) return;
   const rows = [[
-    "district","category","name","address","website","instagram",
-    "operator","operator_type","old_name","alt_name","lat","lon",
-    "osm_type","osm_id","osm_url","last_edited",
+    "district","category","name","alt_names","source","also_in","address",
+    "website","instagram","operator","operator_type","old_name","alt_name",
+    "lat","lon","osm_type","osm_id","osm_url","last_edited",
   ]];
   const typeMap = { n:"node", w:"way", r:"relation" };
+  const sourceFromSpec = (s) => {
+    if (!s) return "osm";
+    if (s === "external=overture") return "overture";
+    if (s === "external=fsq") return "fsq";
+    return "osm";
+  };
   for (const [district, s] of Object.entries(lastResult.per_district)) {
     for (const m of (s.match_examples || [])) {
+      const osmT = typeMap[m.otype] || "";
+      const osmU = osmT && m.oid ? `https://www.openstreetmap.org/${osmT}/${m.oid}` : "";
       rows.push([
-        district, m.c || "", m.n, m.a || "",
-        m.w || "", m.ig || "", m.on || "", m.ot || "",
+        district, m.c || "", m.n, m.ns || "",
+        sourceFromSpec(m.s), m.src2 || "",
+        m.a || "", m.w || "", m.ig || "", m.on || "", m.ot || "",
         m.old || "", m.alt || "", m.lat, m.lon,
-        typeMap[m.otype] || "", m.oid || "",
-        (m.otype && m.oid) ? `https://www.openstreetmap.org/${typeMap[m.otype]}/${m.oid}` : "",
-        m.ts || "",
+        osmT, m.oid || "", osmU, m.ts || "",
       ]);
     }
   }

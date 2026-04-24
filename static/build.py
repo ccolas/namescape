@@ -27,7 +27,7 @@ import sys
 import time
 import unicodedata
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 import osm2geojson
@@ -35,17 +35,20 @@ import snowballstemmer
 from shapely.geometry import Point, shape
 from shapely.strtree import STRtree
 
-from backend.overpass import (
+from .overpass import (
     CATEGORY_KEYS,
     KEEP_TAGS,
+    NAME_KEYS,
     OVERPASS_URL,
     USER_AGENT,
     is_open,
 )
-from backend.palettes import PALETTES
-from backend.tags_config import TAG_CATEGORIES
-
+from .palettes import PALETTES
+from .tags_config import TAG_CATEGORIES
 from .cities import CITIES, CITY_BY_ID
+from . import merge as merge_mod
+from . import overture, foursquare
+from .category_map import map_external as _map_external_category
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("build")
@@ -93,8 +96,7 @@ def overpass_post(query: str, long_timeout: bool = False) -> dict:
     raise RuntimeError(f"All Overpass mirrors failed (last: {last_err})")
 
 # ----------------------------------------------------------------------
-# Stemming / normalization (mirror of backend/matching.py, kept in-module
-# so tokens match whatever JS runtime does)
+# Stemming / normalization (kept in-module so tokens match the JS runtime)
 # ----------------------------------------------------------------------
 
 _TR_MAP = str.maketrans({
@@ -310,11 +312,21 @@ def _spec_matches(spec: dict, tags: dict) -> bool:
 
 
 def category_label_and_spec(tags: dict, ordered_specs: List[dict]) -> Optional[tuple]:
-    """Return (category_label, spec_id) if tags match any spec."""
+    """Return (category_label, spec_id) if tags match any spec.
+
+    OSM records whose primary tag doesn't match any spec in tags_config.py
+    get bucketed under `external=other` — same as Overture/FSQ records that
+    didn't map. Keeps the UI honest: every record either fits a labeled
+    checkbox or lives in the single "Uncategorized" group.
+    """
     for spec in ordered_specs:
         if _spec_matches(spec, tags):
             sid = _spec_id(spec)
             return spec.get("label") or sid, sid
+    for k in CATEGORY_KEYS:
+        v = tags.get(k)
+        if v:
+            return (f"{k}={v}", "external=other")
     return None
 
 
@@ -355,13 +367,152 @@ def _first(tags: dict, keys: list) -> str:
     return ""
 
 
-def process_city(city: dict, force: bool) -> Optional[dict]:
-    out_path = DATA_DIR / f"{city['id']}.json"
+# ----------------------------------------------------------------------
+# Per-source normalization
+# ----------------------------------------------------------------------
+
+def _osm_normalize(raw_elements: list, specs: List[dict]) -> Tuple[List[dict], int]:
+    """Convert raw Overpass elements into a list of source-neutral records.
+
+    Returns (records, n_skipped_closed). District assignment happens later
+    so external sources go through the same PIP path.
+    """
+    out = []
+    skipped_closed = 0
+    for el in raw_elements:
+        tagdict = el.get("tags") or {}
+        name_variants = []
+        seen = set()
+        for k in NAME_KEYS:
+            v = tagdict.get(k)
+            if v and v not in seen:
+                name_variants.append(v)
+                seen.add(v)
+        if not name_variants:
+            continue
+        if not is_open(tagdict):
+            skipped_closed += 1
+            continue
+        if el["type"] == "node":
+            lat, lon = el.get("lat"), el.get("lon")
+        else:
+            c = el.get("center") or {}
+            lat, lon = c.get("lat"), c.get("lon")
+        if lat is None or lon is None:
+            continue
+        cat = category_label_and_spec(tagdict, specs)
+        if cat is None:
+            continue
+        cat_label, spec_id = cat
+        out.append({
+            "source": "osm",
+            "external_id": f"{el['type']}/{el['id']}",
+            "name": name_variants[0],
+            "alt_names": name_variants[1:],
+            "lat": float(lat),
+            "lon": float(lon),
+            "category": cat_label,
+            "spec_id": spec_id,
+            "_osm_tags": tagdict,
+            "_osm_type": el["type"],
+            "_osm_id": el["id"],
+            "_osm_timestamp": el.get("timestamp"),
+        })
+    return out, skipped_closed
+
+
+def _to_bundle_record(rec: dict, district: str, language: str,
+                      spec_labels: Optional[dict] = None) -> dict:
+    """Build the final per-element bundle record from a normalized record.
+
+    `spec_labels` maps spec_id → human label, used to relabel external
+    records that were mapped onto an OSM category so they display
+    consistently with OSM records under the same checkbox.
+    """
+    name_variants = [rec["name"]] + list(rec.get("alt_names") or [])
+    spec_id = rec["spec_id"]
+    raw_cat = rec.get("category") or ""
+    # If the external category mapped onto an OSM spec, use the OSM label;
+    # otherwise keep the source's raw category string.
+    display_cat = (spec_labels or {}).get(spec_id) or raw_cat
+    bundle = {
+        "n": rec["name"],
+        "d": district,
+        "c": display_cat,
+        "s": spec_id,
+        "lat": round(rec["lat"], 6),
+        "lon": round(rec["lon"], 6),
+        "stems": stems_for(" ".join(name_variants), language),
+        "src": rec["source"][0],  # 'o' / 'f' / 'v' for osm/fsq/overture
+    }
+    if rec["source"] == "osm":
+        bundle["oid"] = rec["_osm_id"]
+        bundle["otype"] = rec["_osm_type"][0]  # 'n'/'w'/'r'
+        tagdict = rec["_osm_tags"]
+        addr = _format_address(tagdict)
+        if addr: bundle["a"] = addr
+        site = _first(tagdict, ["website", "contact:website"])
+        if site: bundle["w"] = site
+        ig = _first(tagdict, ["instagram", "contact:instagram"])
+        if ig: bundle["ig"] = ig
+        if tagdict.get("operator:type"): bundle["ot"] = tagdict["operator:type"]
+        if tagdict.get("operator"): bundle["on"] = tagdict["operator"]
+        if tagdict.get("old_name"): bundle["old"] = tagdict["old_name"]
+        if tagdict.get("alt_name"): bundle["alt"] = tagdict["alt_name"]
+        ts = rec.get("_osm_timestamp")
+        if ts: bundle["ts"] = ts[:10]
+    else:
+        # Overture / Foursquare: source-id with a 1-letter type prefix so the
+        # frontend's "open on OSM" link logic doesn't trip over them.
+        bundle["oid"] = rec["external_id"]
+        bundle["otype"] = "x"  # external — frontend will skip the OSM link
+        if rec.get("address"): bundle["a"] = rec["address"]
+        if rec.get("brand"): bundle["on"] = rec["brand"]
+    if len(name_variants) > 1:
+        bundle["ns"] = " | ".join(name_variants[1:])
+    if rec.get("also_in"):
+        bundle["src2"] = "+".join(sorted(set(rec["also_in"])))
+    return bundle
+
+
+import gzip as _gzip
+
+
+# Source-fetch cache: skips re-querying Overpass / Overture / FSQ across builds.
+# Bump the version on a fetcher to invalidate that source.
+FETCH_CACHE_DIR = SITE_DIR.parent.parent / ".fetch_cache"
+FETCH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_CACHE_VERSIONS = {"osm": 1, "districts": 1, "overture": 1, "fsq": 1}
+
+
+def _cached_fetch(key: str, source: str, fetch_fn, force: bool = False):
+    """Read JSON from .fetch_cache/<key>__v<n>.json.gz or run fetch_fn and store it.
+
+    Each source has a version in `_CACHE_VERSIONS`; bumping the version
+    invalidates all cached data for that source.
+    """
+    version = _CACHE_VERSIONS[source]
+    path = FETCH_CACHE_DIR / f"{key}__{source}__v{version}.json.gz"
+    if path.exists() and not force:
+        log.info("  cache hit: .fetch_cache/%s", path.name)
+        with _gzip.open(path, "rt", encoding="utf-8") as f:
+            return json.load(f)
+    out = fetch_fn()
+    with _gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False)
+    log.info("  cached: .fetch_cache/%s (%d items)", path.name, len(out))
+    return out
+
+
+def process_city(city: dict, force: bool,
+                 skip_overture: bool = False, skip_fsq: bool = False,
+                 refetch: bool = False) -> Optional[dict]:
+    out_path = DATA_DIR / f"{city['id']}.json.gz"
     if out_path.exists() and not force:
         log.info("[%s] already built: %s — skipping (use --force to rebuild)",
                  city["id"], out_path.relative_to(SITE_DIR.parent.parent))
         # still return metadata for the config index
-        with open(out_path, "r", encoding="utf-8") as f:
+        with _gzip.open(out_path, "rt", encoding="utf-8") as f:
             existing = json.load(f)
         return {
             "id": city["id"],
@@ -376,14 +527,16 @@ def process_city(city: dict, force: bool) -> Optional[dict]:
         }
 
     log.info("[%s] START", city["id"])
-    districts_gj = load_districts(city)
+    districts_gj = _cached_fetch(city["id"], "districts",
+                                 lambda: load_districts(city), force=refetch)
     n_districts = len(districts_gj["features"])
     log.info("[%s] %d district polygons", city["id"], n_districts)
     if n_districts < 3:
         log.error("[%s] only %d districts — check admin_level / polygon_source", city["id"], n_districts)
         return None
 
-    raw_elements = fetch_pois(city, districts_gj)
+    raw_elements = _cached_fetch(city["id"], "osm",
+                                 lambda: fetch_pois(city, districts_gj), force=refetch)
 
     # Build spatial index for PIP
     geoms = [shape(f["geometry"]) for f in districts_gj["features"]]
@@ -398,62 +551,84 @@ def process_city(city: dict, force: bool) -> Optional[dict]:
         return None
 
     specs = _ordered_specs()
-    elements = []
-    skipped_closed = 0
-    skipped_nodistrict = 0
     language = city["stemmer_language"]
 
-    for el in raw_elements:
-        tagdict = el.get("tags") or {}
-        name = tagdict.get("name") or tagdict.get("name:tr") or tagdict.get("name:en")
-        if not name:
-            continue
-        if not is_open(tagdict):
-            skipped_closed += 1
-            continue
-        if el["type"] == "node":
-            lat, lon = el.get("lat"), el.get("lon")
-        else:
-            c = el.get("center") or {}
-            lat, lon = c.get("lat"), c.get("lon")
-        if lat is None or lon is None:
-            continue
-        d = assign_district(lat, lon)
+    # 1) Normalize OSM raw elements.
+    osm_recs, skipped_closed = _osm_normalize(raw_elements, specs)
+    log.info("[%s] OSM: %d normalized (%d closed dropped)",
+             city["id"], len(osm_recs), skipped_closed)
+
+    # 2) Optionally pull external sources for the same bbox.
+    bbox = bbox_from_geojson(districts_gj)
+    overture_recs: List[dict] = []
+    fsq_recs: List[dict] = []
+    # Note: spec_id is computed from raw category here (post-cache) so cache
+    # entries don't need to be invalidated when the category mapping changes.
+    from collections import Counter
+    unmapped = Counter()  # raw_cat -> count, scoped per (city, source)
+
+    def _assign_spec(r: dict, source: str) -> None:
+        raw = (r.get("category") or "").strip()
+        sid = _map_external_category(raw)
+        r["spec_id"] = sid
+        if sid == "external=other" and raw:
+            unmapped[(source, raw)] += 1
+
+    if not skip_overture:
+        try:
+            raw_overture = _cached_fetch(city["id"], "overture",
+                                         lambda: overture.fetch(bbox), force=refetch)
+            for r in raw_overture:
+                _assign_spec(r, "overture")
+                overture_recs.append(r)
+        except Exception as e:
+            log.warning("[%s] Overture failed (%s) — continuing without it", city["id"], e)
+    if not skip_fsq:
+        try:
+            raw_fsq = _cached_fetch(city["id"], "fsq",
+                                    lambda: foursquare.fetch(bbox), force=refetch)
+            for r in raw_fsq:
+                _assign_spec(r, "fsq")
+                fsq_recs.append(r)
+        except Exception as e:
+            log.warning("[%s] Foursquare failed (%s) — continuing without it", city["id"], e)
+
+    # Dump unmapped categories so the user can extend static/category_map.py.
+    if unmapped:
+        out_txt = FETCH_CACHE_DIR / f"unmapped_categories__{city['id']}.tsv"
+        with open(out_txt, "w", encoding="utf-8") as f:
+            f.write("count\tsource\traw_category\n")
+            for (src, cat), n in unmapped.most_common():
+                f.write(f"{n}\t{src}\t{cat}\n")
+        top = unmapped.most_common(60)
+        log.info("[%s] %d distinct unmapped external categories (%d records); "
+                 "top %d below — see %s for full list",
+                 city["id"], len(unmapped), sum(unmapped.values()),
+                 len(top), out_txt.name)
+        for (src, cat), n in top:
+            log.info("    %6d  [%s]  %s", n, src, cat)
+
+    # 3) Spatial + name dedup across sources (OSM wins; FSQ over Overture).
+    merged = merge_mod.merge(
+        {"osm": osm_recs, "fsq": fsq_recs, "overture": overture_recs},
+        priority=("osm", "fsq", "overture"),
+    )
+
+    # 4) Final pass: PIP to district, build bundle records.
+    spec_labels = {s["spec_id"] if "spec_id" in s else _spec_id(s):
+                   (s.get("label") or _spec_id(s))
+                   for s in specs}
+    elements = []
+    skipped_nodistrict = 0
+    for rec in merged:
+        d = assign_district(rec["lat"], rec["lon"])
         if d is None:
             skipped_nodistrict += 1
             continue
+        elements.append(_to_bundle_record(rec, d, language, spec_labels))
 
-        cat = category_label_and_spec(tagdict, specs)
-        if cat is None:
-            continue
-        cat_label, spec_id = cat
-
-        rec = {
-            "n": name,
-            "d": d,
-            "c": cat_label,
-            "s": spec_id,  # spec id so the frontend can filter by selected tag spec
-            "lat": round(lat, 6),
-            "lon": round(lon, 6),
-            "stems": stems_for(name, language),
-            "oid": el["id"],
-            "otype": el["type"][0],  # 'n'/'w'/'r'
-        }
-        addr = _format_address(tagdict)
-        if addr: rec["a"] = addr
-        site = _first(tagdict, ["website", "contact:website"])
-        if site: rec["w"] = site
-        ig = _first(tagdict, ["instagram", "contact:instagram"])
-        if ig: rec["ig"] = ig
-        if tagdict.get("operator:type"): rec["ot"] = tagdict["operator:type"]
-        if tagdict.get("operator"): rec["on"] = tagdict["operator"]
-        if tagdict.get("old_name"): rec["old"] = tagdict["old_name"]
-        if tagdict.get("alt_name"): rec["alt"] = tagdict["alt_name"]
-        if el.get("timestamp"): rec["ts"] = el["timestamp"][:10]
-        elements.append(rec)
-
-    log.info("[%s] %d open POIs in districts (skipped %d closed, %d outside any district)",
-             city["id"], len(elements), skipped_closed, skipped_nodistrict)
+    log.info("[%s] %d POIs in districts (%d outside any district)",
+             city["id"], len(elements), skipped_nodistrict)
 
     bundle = {
         "meta": {
@@ -471,10 +646,10 @@ def process_city(city: dict, force: bool) -> Optional[dict]:
         "districts": districts_gj,
         "elements": elements,
     }
-    with open(out_path, "w", encoding="utf-8") as f:
+    with _gzip.open(out_path, "wt", encoding="utf-8", compresslevel=6) as f:
         json.dump(bundle, f, ensure_ascii=False, separators=(",", ":"))
     size_mb = out_path.stat().st_size / (1024 * 1024)
-    log.info("[%s] wrote %s (%.1f MB)", city["id"], out_path.name, size_mb)
+    log.info("[%s] wrote %s (%.1f MB gzipped)", city["id"], out_path.name, size_mb)
 
     return {
         "id": city["id"],
@@ -515,7 +690,39 @@ def main() -> int:
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--sleep", type=float, default=20.0,
                     help="seconds to sleep between cities to avoid Overpass rate limits")
+    ap.add_argument("--no-overture", action="store_true",
+                    help="skip Overture Maps (default: include)")
+    ap.add_argument("--no-fsq", action="store_true",
+                    help="skip Foursquare (default: include if HF_TOKEN is set)")
+    ap.add_argument("--refetch", action="store_true",
+                    help="ignore .fetch_cache and re-query Overpass / Overture / FSQ "
+                         "from scratch (default: reuse cached responses across runs)")
+    ap.add_argument("--reindex", action="store_true",
+                    help="just rewrite data/config.json from existing .json.gz bundles "
+                         "(no Overpass / Overture / FSQ calls)")
     args = ap.parse_args()
+
+    if args.reindex:
+        summaries: List[dict] = []
+        for c in CITIES:
+            out_path = DATA_DIR / f"{c['id']}.json.gz"
+            if not out_path.exists():
+                continue
+            with _gzip.open(out_path, "rt", encoding="utf-8") as f:
+                b = json.load(f)
+            summaries.append({
+                "id": c["id"], "label": c["label"], "country": c["country"],
+                "subdivision": c["subdivision"],
+                "stemmer_language": c["stemmer_language"],
+                "map_center": c["map_center"], "map_zoom": c["map_zoom"],
+                "n_districts": len(b["districts"]["features"]),
+                "n_elements": len(b["elements"]),
+            })
+        order = {c["id"]: i for i, c in enumerate(CITIES)}
+        summaries.sort(key=lambda s: order.get(s["id"], 999))
+        write_config(summaries)
+        log.info("reindexed: %d cities -> data/config.json", len(summaries))
+        return 0
 
     ids = [c["id"] for c in CITIES]
     if args.only:
@@ -529,7 +736,10 @@ def main() -> int:
     for i, cid in enumerate(ids):
         city = CITY_BY_ID[cid]
         try:
-            summary = process_city(city, args.force)
+            summary = process_city(city, args.force,
+                                   skip_overture=args.no_overture,
+                                   skip_fsq=args.no_fsq,
+                                   refetch=args.refetch)
         except Exception as e:
             log.exception("[%s] build failed: %s", cid, e)
             continue
@@ -543,9 +753,9 @@ def main() -> int:
     for c in CITIES:
         if c["id"] in existing_ids:
             continue
-        out_path = DATA_DIR / f"{c['id']}.json"
+        out_path = DATA_DIR / f"{c['id']}.json.gz"
         if out_path.exists():
-            with open(out_path, "r", encoding="utf-8") as f:
+            with _gzip.open(out_path, "rt", encoding="utf-8") as f:
                 b = json.load(f)
             summaries.append({
                 "id": c["id"], "label": c["label"], "country": c["country"],

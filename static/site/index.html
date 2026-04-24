@@ -49,11 +49,20 @@
       <div class="card-title">Appearance</div>
       <label class="field-label">Palette</label>
       <select id="palette"></select>
+      <label class="field-label" style="margin-top:10px">Map metric</label>
+      <div class="segmented" id="metric-seg">
+        <label><input type="radio" name="metric" value="fraction" checked /><span>fraction</span></label>
+        <label><input type="radio" name="metric" value="count" /><span>total matches</span></label>
+      </div>
       <label class="field-label" style="margin-top:10px">Color scale</label>
       <div class="segmented" id="scale-seg">
         <label><input type="radio" name="scale" value="auto" checked /><span>auto · 0→max</span></label>
         <label><input type="radio" name="scale" value="absolute" /><span>0→100%</span></label>
       </div>
+      <div class="hint">absolute mode applies to fraction only.</div>
+      <label class="field-label" style="margin-top:10px">Min matches</label>
+      <input type="number" id="min-matches" min="0" step="1" value="0" />
+      <div class="hint">districts with fewer matches are greyed out and excluded from the colormap range.</div>
     </div>
 
     <div class="card">
@@ -86,7 +95,7 @@
               <th data-sort="name">District</th>
               <th data-sort="matches" class="num">match</th>
               <th data-sort="count" class="num">total</th>
-              <th data-sort="fraction" class="num sort-active">%</th>
+              <th data-sort="fraction" class="num sort-active">‰</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -95,8 +104,11 @@
     </div>
 
     <footer class="credit">
-      <a href="https://cedriccolas.com" target="_blank" rel="noopener">Cédric Colas</a>
-      · data from <a href="https://www.openstreetmap.org" target="_blank" rel="noopener">OpenStreetMap</a>
+      <a href="https://cedriccolas.com" target="_blank" rel="noopener">by Cédric Colas</a>
+      · <a href="https://github.com/ccolas/namescape" target="_blank" rel="noopener">Source on GitHub</a>
+      · Data from <a href="https://www.openstreetmap.org" target="_blank" rel="noopener">OSM</a>,
+      <a href="https://overturemaps.org" target="_blank" rel="noopener">Overture</a>,
+      <a href="https://opensource.foursquare.com/os-places/" target="_blank" rel="noopener">Foursquare</a>
     </footer>
   </aside>
 

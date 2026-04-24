@@ -115,7 +115,7 @@ body { display: flex; height: 100vh; overflow: hidden; }
 
 /* ---------------- inputs ---------------- */
 
-textarea, select, input[type="text"] {
+textarea, select, input[type="text"], input[type="number"] {
   width: 100%;
   padding: 8px 10px;
   font-size: 13px;
@@ -132,7 +132,7 @@ textarea {
   min-height: 72px;
   line-height: 1.5;
 }
-textarea:focus, select:focus, input[type="text"]:focus {
+textarea:focus, select:focus, input[type="text"]:focus, input[type="number"]:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
@@ -267,14 +267,6 @@ select {
   color: var(--text);
 }
 .tag-row:hover { background: rgba(59, 91, 219, 0.05); }
-.tag-row.master { font-weight: 600; color: var(--text); }
-.tag-row.master::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--border);
-  margin-left: 6px;
-}
 
 /* custom checkboxes */
 input[type="checkbox"] {
@@ -653,6 +645,16 @@ input[type="checkbox"]:indeterminate::after {
 }
 .match-list li a:hover { text-decoration: underline; }
 .match-list li.plain { color: var(--text-soft); }
+.match-alt {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-style: italic;
+}
+.popup-name { font-weight: 600; font-size: 13px; }
+.popup-cat  { font-size: 11px; color: var(--text-soft); margin-top: 2px; }
+.popup-alt  { font-size: 11px; font-style: italic; color: var(--text-faint); margin-top: 2px; }
+.tag-count { color: var(--text-faint); font-size: 11px; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.tag-count.zero { opacity: 0.4; }
 
 /* hover tooltip */
 .match-tooltip {
