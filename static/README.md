@@ -66,8 +66,8 @@ searches across primary + alt names, so a "Denizbank" branch tagged
 python -m static.build               # build all cities (OSM + Overture + FSQ if HF_TOKEN)
 python -m static.build --only paris  # just one
 python -m static.build --force       # ignore existing bundles
-python -m static.build --no-overture # OSM only
-python -m static.build --no-fsq      # OSM + Overture, no FSQ
+python -m static.build --sources osm           # OSM only
+python -m static.build --sources osm,overture  # OSM + Overture, no FSQ
 ```
 
 A city bundle (`data/<city>.json.gz`) is only rewritten when missing or

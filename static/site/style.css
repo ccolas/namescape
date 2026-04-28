@@ -668,8 +668,12 @@ input[type="checkbox"]:indeterminate::after {
   line-height: 1.5;
   box-shadow: 0 12px 28px rgba(0,0,0,0.35), 0 2px 6px rgba(0,0,0,0.25);
   max-width: 320px;
-  pointer-events: auto;
+  /* pointer-events: none means an accidentally-visible tooltip cannot
+     intercept clicks meant for the map underneath. Links re-enable
+     pointer events on themselves so they remain clickable. */
+  pointer-events: none;
 }
+.match-tooltip a { pointer-events: auto; }
 .match-tooltip.hidden { display: none; }
 .match-tooltip .tt-name {
   font-size: 13px;

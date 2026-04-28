@@ -32,12 +32,16 @@
     <div class="card">
       <div class="card-title">Keywords</div>
       <textarea id="keywords" rows="4" placeholder="one keyword per line"></textarea>
-      <div class="hint">one per line · diacritics optional</div>
+      <div class="hint">one per line or comma-separated · spaces stay inside a keyword (so "kara köprü" is one phrase) · diacritics optional</div>
+      <label class="field-label" style="margin-top:10px">Exclude</label>
+      <textarea id="exclude" rows="2" placeholder="keywords to exclude (exact, case/diacritic-insensitive)"></textarea>
+      <div class="hint">drops any place whose name contains one of these (substring, diacritic-insensitive). Applied after the include match.</div>
     </div>
 
     <div class="card">
       <div class="card-title">Matching</div>
       <div class="segmented" id="mode-seg">
+        <label><input type="radio" name="mode" value="exact" /><span>exact</span></label>
         <label><input type="radio" name="mode" value="substring" /><span>substring</span></label>
         <label><input type="radio" name="mode" value="root" checked /><span>root</span></label>
         <label><input type="radio" name="mode" value="regex" /><span>regex</span></label>

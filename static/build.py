@@ -505,7 +505,7 @@ def _cached_fetch(key: str, source: str, fetch_fn, force: bool = False):
 
 
 def process_city(city: dict, force: bool,
-                 skip_overture: bool = False, skip_fsq: bool = False,
+                 sources: Tuple[str, ...] = ("osm", "overture", "fsq"),
                  refetch: bool = False) -> Optional[dict]:
     out_path = DATA_DIR / f"{city['id']}.json.gz"
     if out_path.exists() and not force:
@@ -535,9 +535,6 @@ def process_city(city: dict, force: bool,
         log.error("[%s] only %d districts — check admin_level / polygon_source", city["id"], n_districts)
         return None
 
-    raw_elements = _cached_fetch(city["id"], "osm",
-                                 lambda: fetch_pois(city, districts_gj), force=refetch)
-
     # Build spatial index for PIP
     geoms = [shape(f["geometry"]) for f in districts_gj["features"]]
     names = [f["properties"]["name"] for f in districts_gj["features"]]
@@ -552,14 +549,20 @@ def process_city(city: dict, force: bool,
 
     specs = _ordered_specs()
     language = city["stemmer_language"]
+    bbox = bbox_from_geojson(districts_gj)
 
-    # 1) Normalize OSM raw elements.
-    osm_recs, skipped_closed = _osm_normalize(raw_elements, specs)
-    log.info("[%s] OSM: %d normalized (%d closed dropped)",
-             city["id"], len(osm_recs), skipped_closed)
+    # 1) OSM
+    osm_recs: List[dict] = []
+    if "osm" in sources:
+        raw_elements = _cached_fetch(city["id"], "osm",
+                                     lambda: fetch_pois(city, districts_gj), force=refetch)
+        osm_recs, skipped_closed = _osm_normalize(raw_elements, specs)
+        log.info("[%s] OSM: %d normalized (%d closed dropped)",
+                 city["id"], len(osm_recs), skipped_closed)
+    else:
+        log.info("[%s] OSM: skipped (not in --sources)", city["id"])
 
     # 2) Optionally pull external sources for the same bbox.
-    bbox = bbox_from_geojson(districts_gj)
     overture_recs: List[dict] = []
     fsq_recs: List[dict] = []
     # Note: spec_id is computed from raw category here (post-cache) so cache
@@ -574,7 +577,7 @@ def process_city(city: dict, force: bool,
         if sid == "external=other" and raw:
             unmapped[(source, raw)] += 1
 
-    if not skip_overture:
+    if "overture" in sources:
         try:
             raw_overture = _cached_fetch(city["id"], "overture",
                                          lambda: overture.fetch(bbox), force=refetch)
@@ -583,7 +586,7 @@ def process_city(city: dict, force: bool,
                 overture_recs.append(r)
         except Exception as e:
             log.warning("[%s] Overture failed (%s) — continuing without it", city["id"], e)
-    if not skip_fsq:
+    if "fsq" in sources:
         try:
             raw_fsq = _cached_fetch(city["id"], "fsq",
                                     lambda: foursquare.fetch(bbox), force=refetch)
@@ -690,10 +693,10 @@ def main() -> int:
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--sleep", type=float, default=20.0,
                     help="seconds to sleep between cities to avoid Overpass rate limits")
-    ap.add_argument("--no-overture", action="store_true",
-                    help="skip Overture Maps (default: include)")
-    ap.add_argument("--no-fsq", action="store_true",
-                    help="skip Foursquare (default: include if HF_TOKEN is set)")
+    ap.add_argument("--sources", default="osm,overture,fsq",
+                    help="comma-separated subset of {osm,overture,fsq} "
+                         "(default: osm,overture,fsq). Sources not listed are "
+                         "neither fetched nor merged into the bundle.")
     ap.add_argument("--refetch", action="store_true",
                     help="ignore .fetch_cache and re-query Overpass / Overture / FSQ "
                          "from scratch (default: reuse cached responses across runs)")
@@ -724,6 +727,14 @@ def main() -> int:
         log.info("reindexed: %d cities -> data/config.json", len(summaries))
         return 0
 
+    valid_sources = {"osm", "overture", "fsq"}
+    sources = tuple(s.strip() for s in args.sources.split(",") if s.strip())
+    bad = [s for s in sources if s not in valid_sources]
+    if bad or not sources:
+        log.error("invalid --sources=%s (must be subset of %s)",
+                  args.sources, ",".join(sorted(valid_sources)))
+        return 1
+
     ids = [c["id"] for c in CITIES]
     if args.only:
         wanted = {s.strip() for s in args.only.split(",") if s.strip()}
@@ -737,8 +748,7 @@ def main() -> int:
         city = CITY_BY_ID[cid]
         try:
             summary = process_city(city, args.force,
-                                   skip_overture=args.no_overture,
-                                   skip_fsq=args.no_fsq,
+                                   sources=sources,
                                    refetch=args.refetch)
         except Exception as e:
             log.exception("[%s] build failed: %s", cid, e)
