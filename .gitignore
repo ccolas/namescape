@@ -36,3 +36,4 @@ static/site/data/*.json
 # Logs
 *.log
 .claude
+deploy.sh
