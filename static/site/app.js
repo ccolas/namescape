@@ -7,7 +7,7 @@
 
 // ---------------- state ----------------
 
-let map, districtsLayer;
+let map, districtsLayer, labelsLayer;
 let paletteMap = {};
 let tagCategories = [];
 let cities = [];
@@ -15,9 +15,9 @@ let cities = [];
 let currentCityId = null;
 let currentCityBundle = null;   // { meta, districts, elements }
 let currentPalette = "Viridis";
-let currentScale = "auto";
 let currentMetric = "fraction";   // "fraction" or "count"
 let minMatches = 0;                // grey out districts with fewer matches than this
+let fillOpacity = 0.78;            // district fill opacity (slider-controlled)
 let lastResult = null;
 let sortKey = "fraction";
 let sortDir = "desc";
@@ -60,12 +60,6 @@ async function init() {
     currentPalette = e.target.value;
     applyStyling(); renderLegend(); renderTable();
   });
-  document.querySelectorAll('input[name="scale"]').forEach(el => {
-    el.addEventListener("change", () => {
-      currentScale = el.value;
-      applyStyling(); renderLegend(); renderTable();
-    });
-  });
   document.querySelectorAll('input[name="metric"]').forEach(el => {
     el.addEventListener("change", () => {
       currentMetric = el.value;
@@ -77,6 +71,40 @@ async function init() {
     minMatches = Number.isFinite(v) && v >= 0 ? v : 0;
     applyStyling(); renderLegend(); renderTable();
   });
+  const opacityEl = document.getElementById("opacity");
+  if (opacityEl) {
+    opacityEl.addEventListener("input", e => {
+      fillOpacity = parseFloat(e.target.value);
+      const v = document.getElementById("opacity-value");
+      if (v) v.textContent = fillOpacity.toFixed(2);
+      applyStyling();
+    });
+  }
+  const appearanceToggle = document.getElementById("appearance-toggle");
+  if (appearanceToggle) {
+    appearanceToggle.addEventListener("click", () => {
+      document.getElementById("appearance-card").classList.toggle("collapsed");
+    });
+  }
+  const sidebarToggle = document.getElementById("sidebar-toggle");
+  if (sidebarToggle) {
+    sidebarToggle.addEventListener("click", () => {
+      document.body.classList.toggle("sidebar-collapsed");
+      // Leaflet caches container size; needs a kick after the sidebar's
+      // display change so tiles + bounds redraw at the new viewport width.
+      setTimeout(() => { if (map) map.invalidateSize(); }, 220);
+    });
+  }
+  const exportBtn = document.getElementById("export-png");
+  if (exportBtn) exportBtn.addEventListener("click", exportMapPNG);
+  const labelsCb = document.getElementById("show-labels");
+  if (labelsCb) {
+    labelsCb.addEventListener("change", () => {
+      if (!labelsLayer || !map) return;
+      if (labelsCb.checked) labelsLayer.addTo(map);
+      else map.removeLayer(labelsLayer);
+    });
+  }
   document.querySelectorAll('input[name="mode"]').forEach(el => el.addEventListener("change", setModeHint));
   document.getElementById("run").addEventListener("click", runQuery);
   document.getElementById("select-all").addEventListener("click", () => toggleAll(true));
@@ -121,7 +149,7 @@ async function loadCity(cityId) {
   currentCityId = cityId;
   const meta = cities.find(c => c.id === cityId);
   document.getElementById("city-meta").textContent =
-    `${meta.n_districts} ${meta.subdivision}${meta.n_districts > 1 ? "s" : ""} · ${meta.n_elements.toLocaleString()} POIs · stemmer: ${meta.stemmer_language}`;
+    `${meta.n_districts} district${meta.n_districts > 1 ? "s" : ""} · ${meta.n_elements.toLocaleString()} POIs · stemmer: ${meta.stemmer_language}`;
 
   showLoadingOverlay(`Loading ${meta.label}…`);
   try {
@@ -144,7 +172,7 @@ async function loadCity(cityId) {
 
   hideLoadingOverlay();
   refreshTagCounts();
-  setStatus(`Ready. ${currentCityBundle.elements.length.toLocaleString()} locations in ${currentCityBundle.districts.features.length} ${currentCityBundle.meta.subdivision}s.`);
+  setStatus(`Ready. ${currentCityBundle.elements.length.toLocaleString()} locations in ${currentCityBundle.districts.features.length} districts.`);
 }
 
 async function fetchCityBundle(cityId) {
@@ -313,11 +341,25 @@ function toggleAll(on) {
 
 function setupMap() {
   map = L.map("map", { preferCanvas: true }).setView([41.05, 29.0], 10);
-  L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+  // CartoDB Voyager: same low-contrast feel as light_all but with a
+  // subtle pale blue for water — gives the map some breathing color
+  // without competing with the heatmap overlays.
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}{r}.png", {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
     maxZoom: 19,
     subdomains: "abcd",
+    // crossOrigin lets the PNG export read the tiles via canvas without
+    // tainting it. CartoDB serves tiles with Access-Control-Allow-Origin: *.
+    crossOrigin: "anonymous",
   }).addTo(map);
+  // Labels-only overlay on top of the GeoJSON layer. Built but not added —
+  // the "Map labels" checkbox in Appearance toggles it on demand. Default off.
+  labelsLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png", {
+    maxZoom: 19,
+    subdomains: "abcd",
+    crossOrigin: "anonymous",
+    pane: "shadowPane",
+  });
 }
 
 function renderDistrictLayer(geo) {
@@ -373,7 +415,6 @@ function isIncluded(s) {
 }
 function scaleMax() {
   const fracDefault = currentMetric === "fraction" ? 1.0 : 1;
-  if (currentMetric === "fraction" && currentScale === "absolute") return 1.0;
   if (!lastResult) return fracDefault;
   let mx = 0;
   for (const s of Object.values(lastResult.per_district)) {
@@ -493,14 +534,18 @@ function parseExcludeKeywords() {
   return el.value.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
 }
 
-// Diacritic-insensitive substring excluder. Returns a fn that's true when
-// the record should be DROPPED. Empty list → no-op (returns false).
+// Whole-word excluder (case + diacritic-insensitive). Drops a record when
+// any of the words in its name equals one of the exclude keywords exactly.
+// So "karaköy" excludes "Karaköy Pazarı" but not "Karaköysburg".
 function buildExcluder(keywords) {
-  const nk = (keywords || []).map(k => normalize(k.trim())).filter(Boolean);
-  if (!nk.length) return () => false;
+  const nk = new Set((keywords || []).map(k => normalize(k.trim())).filter(Boolean));
+  if (!nk.size) return () => false;
   return (el) => {
     const n = el._nn || (el._nn = normalize(el.ns ? `${el.n} | ${el.ns}` : el.n));
-    return nk.some(k => n.indexOf(k) !== -1);
+    for (const tok of n.split(/[^\p{L}\p{N}]+/u)) {
+      if (tok && nk.has(tok)) return true;
+    }
+    return false;
   };
 }
 
@@ -602,7 +647,9 @@ function applyStyling() {
         color: active ? "#1a1e2c" : "#8a92a5",
         weight: active ? 2.5 : 1,
         fillColor: "#d9dde7",
-        fillOpacity: 0.55,
+        // No-data fills track the slider but stay slightly more transparent
+        // so they recede behind colored districts.
+        fillOpacity: Math.max(0.05, fillOpacity * 0.7),
         dashArray: "2,3",
       };
     } else {
@@ -610,7 +657,7 @@ function applyStyling() {
         color: active ? "#1a1e2c" : "#3a4050",
         weight: active ? 2.5 : 0.8,
         fillColor: colorFor(s),
-        fillOpacity: 0.78,
+        fillOpacity: fillOpacity,
         dashArray: null,
       };
     }
@@ -635,24 +682,15 @@ function renderLegend() {
   const grad = `linear-gradient(to right, ${stops.join(", ")})`;
   const mx = scaleMax();
   const isFrac = currentMetric === "fraction";
-  const scaleLabel = (isFrac && currentScale === "auto") || (!isFrac)
-    ? " · auto-scaled" : "";
   const title = isFrac ? "Fraction matching" : "Total matches";
   const fmt = (v) => isFrac ? fmtFrac(v) : Math.round(v).toLocaleString();
-  const nodataLabel = minMatches > 0
-    ? `no locations · or fewer than ${minMatches} matches`
-    : "no locations in district";
   el.innerHTML = `
-    <div class="legend-title">${title}${scaleLabel}</div>
+    <div class="legend-title">${title}</div>
     <div class="legend-bar" style="background:${grad}"></div>
     <div class="legend-scale">
       <span>${isFrac ? fmtFrac(0) : "0"}</span>
       <span>${fmt(mx * 0.5)}</span>
       <span>${fmt(mx)}</span>
-    </div>
-    <div class="legend-nodata">
-      <div class="legend-nodata-swatch"></div>
-      <span>${nodataLabel}</span>
     </div>
   `;
 }
@@ -1025,6 +1063,40 @@ function downloadMatchesCSV() {
   }
   downloadBlob(rows.map(r => r.map(csvEscape).join(",")).join("\n"),
                `namescape_${currentCityId}_matches.csv`);
+}
+
+// ---------------- PNG export ----------------
+
+async function exportMapPNG() {
+  if (typeof htmlToImage === "undefined") {
+    setStatus("PNG export library failed to load.", "error");
+    return;
+  }
+  if (!map) return;
+  const btn = document.getElementById("export-png");
+  const mainEl = document.getElementById("main");
+  const panel = document.getElementById("district-panel");
+  const wasPanelVisible = panel && !panel.classList.contains("hidden");
+  if (wasPanelVisible) panel.classList.add("hidden");
+  if (btn) { btn.disabled = true; btn.textContent = "Rendering…"; }
+  setStatus("Rendering high-res PNG…", "working");
+  try {
+    const dataUrl = await htmlToImage.toPng(mainEl, {
+      pixelRatio: 3,
+      cacheBust: true,
+      backgroundColor: "#e6eaf1",
+    });
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = `namescape_${currentCityId || "map"}.png`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setStatus("Exported PNG.");
+  } catch (e) {
+    setStatus(`Export failed: ${e.message}`, "error");
+  } finally {
+    if (wasPanelVisible) panel.classList.remove("hidden");
+    if (btn) { btn.disabled = false; btn.textContent = "Export map as PNG"; }
+  }
 }
 
 // ---------------- loading overlay ----------------
