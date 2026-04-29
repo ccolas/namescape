@@ -45,7 +45,11 @@ body { display: flex; height: 100vh; overflow: hidden; }
   max-width: 440px;
   padding: 18px 18px 24px;
   overflow-y: auto;
-  background: var(--bg);
+  /* Subtle gradient: cool Viridis-ish at top, fading to neutral. Gives
+     the panel some life without competing with the heatmap. */
+  background:
+    linear-gradient(to bottom, rgba(68, 1, 84, 0.04) 0%, rgba(53, 183, 121, 0.025) 35%, rgba(253, 231, 37, 0.02) 70%, var(--bg) 100%),
+    var(--bg);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -56,15 +60,36 @@ body { display: flex; height: 100vh; overflow: hidden; }
 #sidebar::-webkit-scrollbar-track { background: transparent; }
 #sidebar::-webkit-scrollbar-thumb { background: #d4d8e2; border-radius: 5px; border: 2px solid var(--bg); }
 
-.app-header { margin-bottom: 2px; }
+.app-header { margin-bottom: 2px; padding-bottom: 12px; position: relative; }
+/* Thin Viridis stripe under the brand — echoes the heatmap palette and
+   adds a stripe of color to an otherwise neutral panel. */
+.app-header::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: linear-gradient(to right, #440154 0%, #3b528b 25%, #21908d 50%, #5dc863 75%, #fde725 100%);
+  opacity: 0.7;
+}
 .brand { display: flex; align-items: center; gap: 12px; }
+/* 2×2 heatmap-style mark — squares echo the Viridis district colormap. */
 .brand-mark {
   width: 36px; height: 36px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, #4c6ef5 0%, #7950f2 100%);
-  box-shadow: 0 3px 10px rgba(76, 110, 245, 0.35);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 3px;
   flex-shrink: 0;
 }
+.brand-mark > i {
+  display: block;
+  border-radius: 3px;
+}
+.brand-mark > i:nth-child(1) { background: #440154; }
+.brand-mark > i:nth-child(2) { background: #31688e; }
+.brand-mark > i:nth-child(3) { background: #35b779; }
+.brand-mark > i:nth-child(4) { background: #fde725; }
 .brand h1 {
   font-size: 16px;
   font-weight: 700;
@@ -97,6 +122,66 @@ body { display: flex; height: 100vh; overflow: hidden; }
   margin-bottom: 10px;
 }
 .card-title.row { display: flex; justify-content: space-between; align-items: center; }
+.card-title .info-tip { vertical-align: middle; margin-left: 6px; }
+
+/* ---------------- info tooltips (?) ---------------- */
+
+.info-tip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--border);
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 700;
+  font-style: normal;
+  cursor: help;
+  position: relative;
+  user-select: none;
+  transition: background 0.12s, color 0.12s;
+  flex-shrink: 0;
+}
+.info-tip::before { content: "?"; }
+.info-tip:hover { background: var(--accent); color: white; }
+.info-tip:hover::after,
+.info-tip:focus::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  /* Anchor the tooltip's left edge to the left of the (?) so it extends
+     rightward into the sidebar — keeps it from clipping against the
+     sidebar's left edge (overflow-y:auto clips x too). */
+  left: 0;
+  transform: none;
+  background: #1a1e2c;
+  color: #e8ecfb;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  font-style: normal;
+  letter-spacing: 0;
+  text-transform: none;
+  line-height: 1.45;
+  width: 220px;
+  white-space: normal;
+  text-align: left;
+  z-index: 10000;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+  pointer-events: none;
+}
+/* For bubbles near the right edge of a card (where extending rightward
+   would clip), anchor the tooltip's right edge to the (?) instead so it
+   extends leftward. */
+.info-tip.tip-right:hover::after,
+.info-tip.tip-right:focus::after {
+  left: auto;
+  right: 0;
+}
+.field-label .info-tip { margin-left: 5px; }
 
 .field-label {
   display: block;
@@ -755,6 +840,121 @@ input[type="checkbox"]:indeterminate::after {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+/* ---------------- sidebar toggle ---------------- */
+
+#sidebar-toggle {
+  position: fixed;
+  /* Anchored to the bottom so it doesn't fight Leaflet's top-left zoom controls. */
+  bottom: 24px;
+  left: 380px;
+  z-index: 1200;
+  width: 22px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-left: none;
+  background: var(--surface);
+  color: var(--text-soft);
+  border-radius: 0 8px 8px 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: left 0.2s, transform 0.2s;
+  box-shadow: var(--shadow-sm);
+}
+#sidebar-toggle:hover { color: var(--accent); }
+#sidebar-toggle svg { transition: transform 0.2s; }
+
+body.sidebar-collapsed #sidebar { display: none; }
+body.sidebar-collapsed #sidebar-toggle { left: 0; }
+body.sidebar-collapsed #sidebar-toggle svg { transform: rotate(180deg); }
+
+/* ---------------- collapsible cards ---------------- */
+
+.card.collapsible .card-title {
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 0;
+}
+.card.collapsible:not(.collapsed) .card-title { margin-bottom: 10px; }
+.card.collapsible .collapse-chevron {
+  color: var(--text-faint);
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+.card.collapsible.collapsed .collapse-chevron { transform: rotate(-90deg); }
+.card.collapsible.collapsed .card-body { display: none; }
+
+/* ---------------- slider ---------------- */
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.slider-row input[type="range"] {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  outline: none;
+  padding: 0;
+  border: none;
+}
+.slider-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px; height: 14px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid var(--surface);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.slider-row input[type="range"]::-moz-range-thumb {
+  width: 14px; height: 14px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid var(--surface);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.slider-value {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-soft);
+  min-width: 32px;
+  text-align: right;
+}
+
+/* ---------------- export button ---------------- */
+
+.export-btn {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.export-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.export-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 /* ---------------- loading overlay ---------------- */

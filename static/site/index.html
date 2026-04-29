@@ -10,68 +10,52 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
   <link rel="stylesheet" href="style.css" />
+  <script src="https://unpkg.com/html-to-image@1.11.13/dist/html-to-image.js"></script>
 </head>
 <body>
+  <button id="sidebar-toggle" type="button" aria-label="Toggle sidebar" title="Toggle sidebar">
+    <svg viewBox="0 0 12 12" width="12" height="12"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M7.5 2.5l-3 3.5 3 3.5"/></svg>
+  </button>
   <aside id="sidebar">
     <header class="app-header">
       <div class="brand">
-        <div class="brand-mark"></div>
+        <div class="brand-mark"><i></i><i></i><i></i><i></i></div>
         <div>
           <h1>Namescape</h1>
-          <p class="sub">Geospatial linguistic landscape analysis from OSM</p>
+          <p class="sub">Geospatial linguistic landscape analysis from open POI sources</p>
         </div>
       </div>
     </header>
 
     <div class="card">
-      <div class="card-title">City</div>
+      <div class="card-title">City<span class="info-tip" tabindex="0" data-tip="The city to analyse. Selecting one downloads its pre-built bundle (districts + POIs). Bundles are cached by your browser."></span></div>
       <select id="city"></select>
       <div id="city-meta" class="hint"></div>
     </div>
 
     <div class="card">
-      <div class="card-title">Keywords</div>
+      <div class="card-title">Keywords<span class="info-tip" tabindex="0" data-tip="The terms you want to find inside place names. One per line, or comma-separated. Spaces stay inside a phrase (so &quot;kara köprü&quot; is one two-word match). Matching is case- and diacritic-insensitive."></span></div>
       <textarea id="keywords" rows="4" placeholder="one keyword per line"></textarea>
-      <div class="hint">one per line or comma-separated · spaces stay inside a keyword (so "kara köprü" is one phrase) · diacritics optional</div>
-      <label class="field-label" style="margin-top:10px">Exclude</label>
-      <textarea id="exclude" rows="2" placeholder="keywords to exclude (exact, case/diacritic-insensitive)"></textarea>
-      <div class="hint">drops any place whose name contains one of these (substring, diacritic-insensitive). Applied after the include match.</div>
+      <div class="hint">one per line · keywords can contain spaces · diacritics optional</div>
+      <label class="field-label" style="margin-top:10px">Exclude<span class="info-tip" tabindex="0" data-tip="Drops a place when one of the words in its name equals any of these exactly (whole-word, case- and diacritic-insensitive). Useful to include &quot;kara&quot; but exclude &quot;karaköy&quot; (the neighbourhood) — the word match means &quot;Karaköy Pazarı&quot; is dropped while &quot;Karadeniz Fırını&quot; is kept."></span></label>
+      <textarea id="exclude" rows="2" placeholder="keyword to exclude"></textarea>
+      <div class="hint">drops any place whose name contains one of these as a whole word (case- and diacritic-insensitive). Applied after the include match.</div>
     </div>
 
     <div class="card">
-      <div class="card-title">Matching</div>
+      <div class="card-title">Matching<span class="info-tip" tabindex="0" data-tip="How keywords are compared against place names. Selecting a mode below shows its details."></span></div>
       <div class="segmented" id="mode-seg">
-        <label><input type="radio" name="mode" value="exact" /><span>exact</span></label>
+        <label><input type="radio" name="mode" value="exact" checked /><span>exact</span></label>
         <label><input type="radio" name="mode" value="substring" /><span>substring</span></label>
-        <label><input type="radio" name="mode" value="root" checked /><span>root</span></label>
+        <label><input type="radio" name="mode" value="root" /><span>root</span></label>
         <label><input type="radio" name="mode" value="regex" /><span>regex</span></label>
       </div>
       <div id="mode-hint" class="hint"></div>
     </div>
 
     <div class="card">
-      <div class="card-title">Appearance</div>
-      <label class="field-label">Palette</label>
-      <select id="palette"></select>
-      <label class="field-label" style="margin-top:10px">Map metric</label>
-      <div class="segmented" id="metric-seg">
-        <label><input type="radio" name="metric" value="fraction" checked /><span>fraction</span></label>
-        <label><input type="radio" name="metric" value="count" /><span>total matches</span></label>
-      </div>
-      <label class="field-label" style="margin-top:10px">Color scale</label>
-      <div class="segmented" id="scale-seg">
-        <label><input type="radio" name="scale" value="auto" checked /><span>auto · 0→max</span></label>
-        <label><input type="radio" name="scale" value="absolute" /><span>0→100%</span></label>
-      </div>
-      <div class="hint">absolute mode applies to fraction only.</div>
-      <label class="field-label" style="margin-top:10px">Min matches</label>
-      <input type="number" id="min-matches" min="0" step="1" value="0" />
-      <div class="hint">districts with fewer matches are greyed out and excluded from the colormap range.</div>
-    </div>
-
-    <div class="card">
       <div class="card-title row">
-        Location types
+        <span>Location types<span class="info-tip" tabindex="0" data-tip="Which kinds of places to include. Hierarchical: toggle whole categories or individual OSM tags (e.g. shop=bakery). External-source records mapped to an OSM tag are folded into the same checkboxes; unmapped records live under Uncategorized. Counts show how many places of each type exist in the loaded city."></span></span>
         <span class="mini-buttons">
           <button type="button" id="select-all">all</button>
           <button type="button" id="deselect-all">none</button>
@@ -82,6 +66,36 @@
 
     <button type="button" id="run" class="run-btn">Run</button>
     <div id="status" class="status"></div>
+
+    <div class="card collapsible" id="appearance-card">
+      <div class="card-title row" id="appearance-toggle">
+        <span>Appearance<span class="info-tip" tabindex="0" data-tip="Map styling. These options re-style the existing result without re-running the query."></span></span>
+        <svg class="collapse-chevron" viewBox="0 0 10 10" width="10" height="10"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M2 3.5l3 3 3-3"/></svg>
+      </div>
+      <div class="card-body">
+        <label class="field-label">Palette<span class="info-tip" tabindex="0" data-tip="Color ramp used to shade districts on the map."></span></label>
+        <select id="palette"></select>
+        <label class="field-label" style="margin-top:10px">Map metric<span class="info-tip" tabindex="0" data-tip="What the district color encodes. fraction: matches divided by filtered total in that district (shown as ‰). total matches: raw match count, regardless of district size."></span></label>
+        <div class="segmented" id="metric-seg">
+          <label><input type="radio" name="metric" value="fraction" checked /><span>fraction</span></label>
+          <label><input type="radio" name="metric" value="count" /><span>total matches</span></label>
+        </div>
+        <label class="field-label" style="margin-top:10px">Min matches<span class="info-tip" tabindex="0" data-tip="Districts with fewer matches than this threshold are greyed out and excluded from the colormap range. Use to suppress noise from low-volume districts."></span></label>
+        <input type="number" id="min-matches" min="0" step="1" value="0" />
+        <div class="hint">districts with fewer matches are greyed out and excluded from the colormap range.</div>
+        <label class="field-label" style="margin-top:10px">District opacity<span class="info-tip" tabindex="0" data-tip="Lower opacity reveals streets and labels through the district overlays. Useful when picking out specific locations on the basemap."></span></label>
+        <div class="slider-row">
+          <input type="range" id="opacity" min="0.1" max="1.0" step="0.05" value="0.78" />
+          <span class="slider-value" id="opacity-value">0.78</span>
+        </div>
+        <label class="tag-row" style="margin-top:10px;padding-left:0">
+          <input type="checkbox" id="show-labels" />
+          <span>Map labels <span class="info-tip" tabindex="0" data-tip="Show street, place, and city labels on top of the heatmap."></span></span>
+        </label>
+        <label class="field-label" style="margin-top:14px">Export<span class="info-tip" tabindex="0" data-tip="Download the current map view (districts + legend) as a high-resolution PNG (3× pixel ratio)."></span></label>
+        <button type="button" id="export-png" class="export-btn">Export map as PNG</button>
+      </div>
+    </div>
 
     <div id="results-card" class="card hidden">
       <div class="card-title row">
@@ -108,9 +122,9 @@
     </div>
 
     <footer class="credit">
-      <a href="https://cedriccolas.com" target="_blank" rel="noopener">by Cédric Colas</a>
-      · <a href="https://github.com/ccolas/namescape" target="_blank" rel="noopener">Source on GitHub</a>
-      · Data from <a href="https://www.openstreetmap.org" target="_blank" rel="noopener">OSM</a>,
+      Made by <a href="https://cedriccolas.com" target="_blank" rel="noopener">Cédric Colas</a>
+      · More info and code on <a href="https://github.com/ccolas/namescape" target="_blank" rel="noopener">GitHub</a>
+      <br>Data from <a href="https://www.openstreetmap.org" target="_blank" rel="noopener">OSM</a>,
       <a href="https://overturemaps.org" target="_blank" rel="noopener">Overture</a>,
       <a href="https://opensource.foursquare.com/os-places/" target="_blank" rel="noopener">Foursquare</a>
     </footer>
