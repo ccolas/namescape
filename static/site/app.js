@@ -1068,13 +1068,11 @@ function downloadMatchesCSV() {
 // ---------------- PNG export ----------------
 
 async function exportMapPNG() {
-  if (typeof htmlToImage === "undefined") {
-    setStatus("PNG export library failed to load.", "error");
-    return;
-  }
   if (!map) return;
   const btn = document.getElementById("export-png");
   const mainEl = document.getElementById("main");
+  const mapEl = document.getElementById("map");
+  const legendEl = document.getElementById("legend");
   const panel = document.getElementById("district-panel");
   const wasPanelVisible = panel && !panel.classList.contains("hidden");
   if (wasPanelVisible) panel.classList.add("hidden");
@@ -1082,19 +1080,43 @@ async function exportMapPNG() {
   setStatus("Rendering high-res PNG…", "working");
   try {
     await prepareMapForExport();
-    const opts = {
-      pixelRatio: 3,
-      cacheBust: false,
-      backgroundColor: "#e6eaf1",
-      skipFonts: true,
-    };
-    // html-to-image has a known race where the first toPng after a fresh
-    // canvas paint can drop dynamically-drawn canvas content (here, the
-    // district overlay rendered by Leaflet's canvas renderer with
-    // preferCanvas:true). Calling toPng twice and discarding the first
-    // result is the documented workaround.
-    await htmlToImage.toPng(mainEl, { ...opts, pixelRatio: 1 });
-    const dataUrl = await htmlToImage.toPng(mainEl, opts);
+    const scale = 3;
+    const mainRect = mainEl.getBoundingClientRect();
+    const out = document.createElement("canvas");
+    out.width = Math.round(mainRect.width * scale);
+    out.height = Math.round(mainRect.height * scale);
+    const ctx = out.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.fillStyle = "#e6eaf1";
+    ctx.fillRect(0, 0, out.width, out.height);
+
+    // Composite Leaflet's panes directly. html-to-image's foreignObject
+    // path is unreliable on Safari (returns blank PNGs or drops the canvas
+    // overlay), so we draw tiles, canvas overlays, and SVG renderers onto
+    // our own canvas in pane z-index order.
+    await drawMapToCanvas(ctx, mapEl, mainRect, scale);
+
+    // Legend is plain HTML/CSS with no canvas; html-to-image handles it
+    // reliably. Double-render to dodge the first-call race on Safari.
+    if (legendEl && legendEl.offsetParent !== null && typeof htmlToImage !== "undefined") {
+      try {
+        const legendOpts = { pixelRatio: scale, cacheBust: false, backgroundColor: null, skipFonts: true };
+        await htmlToImage.toPng(legendEl, { ...legendOpts, pixelRatio: 1 });
+        const legendUrl = await htmlToImage.toPng(legendEl, legendOpts);
+        const legendImg = await loadImage(legendUrl);
+        const r = legendEl.getBoundingClientRect();
+        ctx.drawImage(
+          legendImg,
+          (r.left - mainRect.left) * scale,
+          (r.top - mainRect.top) * scale,
+          r.width * scale,
+          r.height * scale,
+        );
+      } catch {}
+    }
+
+    const dataUrl = out.toDataURL("image/png");
     const a = document.createElement("a");
     a.href = dataUrl;
     a.download = `namescape_${currentCityId || "map"}.png`;
@@ -1108,9 +1130,60 @@ async function exportMapPNG() {
   }
 }
 
-// Force Leaflet's canvas renderer to repaint the district overlay and wait
-// for any pending tile loads + two animation frames so the canvas pixel
-// buffer is fully populated before html-to-image reads it via toDataURL.
+async function drawMapToCanvas(ctx, mapEl, originRect, scale) {
+  const panes = Array.from(mapEl.querySelectorAll(".leaflet-pane"));
+  panes.sort((a, b) => {
+    const za = parseFloat(getComputedStyle(a).zIndex) || 0;
+    const zb = parseFloat(getComputedStyle(b).zIndex) || 0;
+    return za - zb;
+  });
+  for (const pane of panes) {
+    const leaves = pane.querySelectorAll("img, canvas, svg");
+    for (const leaf of leaves) {
+      const r = leaf.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      const x = (r.left - originRect.left) * scale;
+      const y = (r.top - originRect.top) * scale;
+      const w = r.width * scale;
+      const h = r.height * scale;
+      const tag = leaf.tagName;
+      try {
+        if (tag === "IMG") {
+          if (!leaf.complete || leaf.naturalWidth === 0) continue;
+          const op = parseFloat(getComputedStyle(leaf).opacity);
+          if (!isNaN(op) && op === 0) continue;
+          ctx.drawImage(leaf, x, y, w, h);
+        } else if (tag === "CANVAS") {
+          if (leaf.width === 0 || leaf.height === 0) continue;
+          ctx.drawImage(leaf, x, y, w, h);
+        } else if (tag === "svg") {
+          const clone = leaf.cloneNode(true);
+          clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+          if (!clone.getAttribute("width")) clone.setAttribute("width", String(r.width));
+          if (!clone.getAttribute("height")) clone.setAttribute("height", String(r.height));
+          const data = new XMLSerializer().serializeToString(clone);
+          const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(data);
+          const img = await loadImage(url);
+          ctx.drawImage(img, x, y, w, h);
+        }
+      } catch {}
+    }
+  }
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+// Force Leaflet's canvas renderer to repaint and wait for any pending tile
+// loads + two animation frames so all canvas pixel buffers and tile <img>
+// elements are fully populated before we read them.
 function prepareMapForExport() {
   return new Promise(resolve => {
     try {
