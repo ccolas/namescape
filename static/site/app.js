@@ -1081,11 +1081,20 @@ async function exportMapPNG() {
   if (btn) { btn.disabled = true; btn.textContent = "Rendering…"; }
   setStatus("Rendering high-res PNG…", "working");
   try {
-    const dataUrl = await htmlToImage.toPng(mainEl, {
+    await prepareMapForExport();
+    const opts = {
       pixelRatio: 3,
-      cacheBust: true,
+      cacheBust: false,
       backgroundColor: "#e6eaf1",
-    });
+      skipFonts: true,
+    };
+    // html-to-image has a known race where the first toPng after a fresh
+    // canvas paint can drop dynamically-drawn canvas content (here, the
+    // district overlay rendered by Leaflet's canvas renderer with
+    // preferCanvas:true). Calling toPng twice and discarding the first
+    // result is the documented workaround.
+    await htmlToImage.toPng(mainEl, { ...opts, pixelRatio: 1 });
+    const dataUrl = await htmlToImage.toPng(mainEl, opts);
     const a = document.createElement("a");
     a.href = dataUrl;
     a.download = `namescape_${currentCityId || "map"}.png`;
@@ -1097,6 +1106,31 @@ async function exportMapPNG() {
     if (wasPanelVisible) panel.classList.remove("hidden");
     if (btn) { btn.disabled = false; btn.textContent = "Export map as PNG"; }
   }
+}
+
+// Force Leaflet's canvas renderer to repaint the district overlay and wait
+// for any pending tile loads + two animation frames so the canvas pixel
+// buffer is fully populated before html-to-image reads it via toDataURL.
+function prepareMapForExport() {
+  return new Promise(resolve => {
+    try {
+      if (districtsLayer && districtsLayer.redraw) districtsLayer.redraw();
+      const renderer = map && map.options && map.options.renderer;
+      if (renderer && typeof renderer._update === "function") renderer._update();
+    } catch {}
+    const tileLayers = [];
+    if (map) map.eachLayer(l => { if (l instanceof L.TileLayer) tileLayers.push(l); });
+    const pendingTiles = tileLayers.filter(l => l._loading);
+    const waitTiles = pendingTiles.length === 0
+      ? Promise.resolve()
+      : Promise.race([
+          Promise.all(pendingTiles.map(l => new Promise(r => l.once("load", r)))),
+          new Promise(r => setTimeout(r, 1500)),
+        ]);
+    waitTiles.then(() => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+  });
 }
 
 // ---------------- loading overlay ----------------
