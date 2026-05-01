@@ -1269,41 +1269,65 @@ async function exportMapPNG() {
     await prepareMapForExport();
     const scale = 3;
     const mainRect = mainEl.getBoundingClientRect();
-    const out = document.createElement("canvas");
-    out.width = Math.round(mainRect.width * scale);
-    out.height = Math.round(mainRect.height * scale);
-    const ctx = out.getContext("2d");
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-    ctx.fillStyle = "#e6eaf1";
-    ctx.fillRect(0, 0, out.width, out.height);
 
-    // Composite Leaflet's panes directly. html-to-image's foreignObject
-    // path is unreliable on Safari (returns blank PNGs or drops the canvas
-    // overlay), so we draw tiles, canvas overlays, and SVG renderers onto
-    // our own canvas in pane z-index order.
-    await drawMapToCanvas(ctx, mapEl, mainRect, scale);
-
-    // Legend is plain HTML/CSS with no canvas; html-to-image handles it
-    // reliably. Double-render to dodge the first-call race on Safari.
-    if (legendEl && legendEl.offsetParent !== null && typeof htmlToImage !== "undefined") {
+    // Primary path: render the whole #main via html-to-image. Reading the
+    // polygon canvas's pixel buffer with drawImage and re-compositing it
+    // ourselves doesn't reproduce the actual on-screen alpha — the basemap
+    // has `mix-blend-mode: plus-lighter` and the canvas is composited
+    // through nested Leaflet panes, so the same buffer reads as more
+    // saturated in our manual export than on the live page. html-to-image
+    // serializes the rendered DOM into an SVG foreignObject, which goes
+    // through the browser's normal CSS compositing, so the output matches
+    // the live view. Canvas elements are preserved via `toDataURL`.
+    let dataUrl = null;
+    if (typeof htmlToImage !== "undefined") {
       try {
-        const legendOpts = { pixelRatio: scale, cacheBust: false, backgroundColor: null, skipFonts: true };
-        await htmlToImage.toPng(legendEl, { ...legendOpts, pixelRatio: 1 });
-        const legendUrl = await htmlToImage.toPng(legendEl, legendOpts);
-        const legendImg = await loadImage(legendUrl);
-        const r = legendEl.getBoundingClientRect();
-        ctx.drawImage(
-          legendImg,
-          (r.left - mainRect.left) * scale,
-          (r.top - mainRect.top) * scale,
-          r.width * scale,
-          r.height * scale,
-        );
-      } catch {}
+        const opts = {
+          pixelRatio: scale,
+          cacheBust: false,
+          backgroundColor: "#e6eaf1",
+          skipFonts: true,
+        };
+        // Double-render to dodge the first-call race on Safari.
+        await htmlToImage.toPng(mainEl, { ...opts, pixelRatio: 1 });
+        dataUrl = await htmlToImage.toPng(mainEl, opts);
+      } catch (e) {
+        dataUrl = null;
+      }
     }
 
-    const dataUrl = out.toDataURL("image/png");
+    if (!dataUrl) {
+      // Fallback: manually composite Leaflet's panes onto a canvas. Used
+      // when html-to-image fails (older Safari has been known to produce
+      // blank canvases through foreignObject).
+      const out = document.createElement("canvas");
+      out.width = Math.round(mainRect.width * scale);
+      out.height = Math.round(mainRect.height * scale);
+      const ctx = out.getContext("2d");
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.fillStyle = "#e6eaf1";
+      ctx.fillRect(0, 0, out.width, out.height);
+      await drawMapToCanvas(ctx, mapEl, mainRect, scale);
+      if (legendEl && legendEl.offsetParent !== null && typeof htmlToImage !== "undefined") {
+        try {
+          const legendOpts = { pixelRatio: scale, cacheBust: false, backgroundColor: null, skipFonts: true };
+          await htmlToImage.toPng(legendEl, { ...legendOpts, pixelRatio: 1 });
+          const legendUrl = await htmlToImage.toPng(legendEl, legendOpts);
+          const legendImg = await loadImage(legendUrl);
+          const r = legendEl.getBoundingClientRect();
+          ctx.drawImage(
+            legendImg,
+            (r.left - mainRect.left) * scale,
+            (r.top - mainRect.top) * scale,
+            r.width * scale,
+            r.height * scale,
+          );
+        } catch {}
+      }
+      dataUrl = out.toDataURL("image/png");
+    }
+
     const a = document.createElement("a");
     a.href = dataUrl;
     a.download = `namescape_${currentCityId || "map"}.png`;
@@ -1325,6 +1349,16 @@ async function drawMapToCanvas(ctx, mapEl, originRect, scale) {
     return za - zb;
   });
   for (const pane of panes) {
+    // Tooltip pane holds permanent label divs. The img/canvas/svg walk
+    // below skips plain DOM, so render the whole pane via html-to-image.
+    // Render the pane (not each child) because each tooltip carries an
+    // inline `transform: translate3d(...)` for its position; rendering a
+    // child alone shifts the transform outside the foreignObject viewport
+    // and produces a blank image.
+    if (pane.classList.contains("leaflet-tooltip-pane")) {
+      await drawTooltipPaneToCanvas(ctx, pane, originRect, scale);
+      continue;
+    }
     const leaves = pane.querySelectorAll("img, canvas, svg");
     for (const leaf of leaves) {
       const r = leaf.getBoundingClientRect();
@@ -1342,10 +1376,25 @@ async function drawMapToCanvas(ctx, mapEl, originRect, scale) {
           ctx.drawImage(leaf, x, y, w, h);
         } else if (tag === "CANVAS") {
           if (leaf.width === 0 || leaf.height === 0) continue;
+          // Bilinear (not bicubic) for the polygon canvas: bicubic
+          // overshoots at sharp alpha transitions, which amplifies the
+          // 0.78 fill into a denser-looking color on edges/anti-aliased
+          // pixels and reads as "more opaque" than the live screen.
+          ctx.save();
+          ctx.imageSmoothingQuality = "low";
           ctx.drawImage(leaf, x, y, w, h);
-        } else if (tag === "svg") {
+          ctx.restore();
+        } else if (tag === "svg" || tag === "SVG") {
           const clone = leaf.cloneNode(true);
           clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+          // Leaflet positions the SVG container via inline
+          // `transform: translate3d(...)`. The bounding rect we draw at
+          // already includes that translation, and some browsers apply
+          // CSS transforms when rendering SVG-as-image — strip it so the
+          // shift isn't applied twice and the content lands in the rect.
+          clone.style.transform = "";
+          clone.style.left = "";
+          clone.style.top = "";
           if (!clone.getAttribute("width")) clone.setAttribute("width", String(r.width));
           if (!clone.getAttribute("height")) clone.setAttribute("height", String(r.height));
           const data = new XMLSerializer().serializeToString(clone);
@@ -1356,6 +1405,78 @@ async function drawMapToCanvas(ctx, mapEl, originRect, scale) {
       } catch {}
     }
   }
+}
+
+// Permanent district labels are L.tooltip divs with inline transforms in
+// the tooltip pane. html-to-image renders them blank because the inline
+// transform pushes content outside the foreignObject viewport, so we draw
+// each one directly with Canvas2D using styles that mirror the live CSS.
+async function drawTooltipPaneToCanvas(ctx, pane, originRect, scale) {
+  const tips = pane.querySelectorAll(".district-perm-label");
+  for (const tip of tips) {
+    const r = tip.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    if (getComputedStyle(tip).visibility === "hidden") continue;
+    const x = (r.left - originRect.left) * scale;
+    const y = (r.top - originRect.top) * scale;
+    const w = r.width * scale;
+    const h = r.height * scale;
+    const radius = 5 * scale;
+
+    ctx.save();
+    ctx.shadowColor = "rgba(0, 0, 0, 0.15)";
+    ctx.shadowBlur = 3 * scale;
+    ctx.shadowOffsetY = 1 * scale;
+    ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
+    roundedRectPath(ctx, x, y, w, h, radius);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.lineWidth = 1 * scale;
+    ctx.strokeStyle = "#cdd2df";
+    roundedRectPath(ctx, x + 0.5 * scale, y + 0.5 * scale, w - scale, h - scale, Math.max(0, radius - 0.5 * scale));
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    ctx.font = `600 ${10.5 * scale}px Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    const nameEl = tip.querySelector(".perm-name");
+    const valEl = tip.querySelector(".perm-val");
+    if (nameEl) {
+      const nr = nameEl.getBoundingClientRect();
+      ctx.fillStyle = "#1a1e2c";
+      ctx.fillText(
+        nameEl.textContent,
+        (nr.left - originRect.left + nr.width / 2) * scale,
+        (nr.top - originRect.top + nr.height / 2) * scale,
+      );
+    }
+    if (valEl) {
+      const vr = valEl.getBoundingClientRect();
+      ctx.fillStyle = "#3b5bdb";
+      ctx.fillText(
+        valEl.textContent,
+        (vr.left - originRect.left + vr.width / 2) * scale,
+        (vr.top - originRect.top + vr.height / 2) * scale,
+      );
+    }
+    ctx.restore();
+  }
+}
+
+function roundedRectPath(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
 }
 
 function loadImage(src) {
