@@ -7,7 +7,7 @@
 
 // ---------------- state ----------------
 
-let map, districtsLayer, labelsLayer;
+let map, districtsLayer;
 let paletteMap = {};
 let tagCategories = [];
 let cities = [];
@@ -18,11 +18,21 @@ let currentPalette = "Viridis";
 let currentMetric = "fraction";   // "fraction" or "count"
 let minMatches = 0;                // grey out districts with fewer matches than this
 let fillOpacity = 0.78;            // district fill opacity (slider-controlled)
+let hitColor = "#e03131";          // color for the per-district hit dots (Appearance picker)
+let hitOpacity = 0.6;              // fill opacity of hit dots (slider-controlled)
 let lastResult = null;
 let sortKey = "fraction";
 let sortDir = "desc";
 let selectedDistrict = null;
 let layerByName = {};
+
+// Per-district map overlays toggled from the results table:
+// labeledDistricts -> permanent name+value labels rendered at polygon centers
+// hitDistricts     -> dots on the map for every match in that district
+let labeledDistricts = new Set();
+let hitDistricts = new Set();
+let permLabelByName = {};   // name -> L.tooltip
+let hitGroupByName = {};    // name -> L.layerGroup of circleMarkers
 
 const MODE_HINTS = {
   exact:     "Whole-word match (case/diacritic-insensitive). One of the words in the name must equal a keyword exactly — 'fetih' hits 'Fetih Camii' but not 'Fetihspor'.",
@@ -64,6 +74,7 @@ async function init() {
     el.addEventListener("change", () => {
       currentMetric = el.value;
       applyStyling(); renderLegend(); renderTable();
+      refreshAllLabels();  // label content is metric-dependent
     });
   });
   document.getElementById("min-matches").addEventListener("input", e => {
@@ -97,12 +108,26 @@ async function init() {
   }
   const exportBtn = document.getElementById("export-png");
   if (exportBtn) exportBtn.addEventListener("click", exportMapPNG);
-  const labelsCb = document.getElementById("show-labels");
-  if (labelsCb) {
-    labelsCb.addEventListener("change", () => {
-      if (!labelsLayer || !map) return;
-      if (labelsCb.checked) labelsLayer.addTo(map);
-      else map.removeLayer(labelsLayer);
+  const hitOpacityEl = document.getElementById("hit-opacity");
+  if (hitOpacityEl) {
+    hitOpacityEl.addEventListener("input", e => {
+      hitOpacity = parseFloat(e.target.value);
+      const v = document.getElementById("hit-opacity-value");
+      if (v) v.textContent = hitOpacity.toFixed(2);
+      refreshAllHits();
+    });
+  }
+  const hitColorRow = document.getElementById("hit-color");
+  if (hitColorRow) {
+    // Mark the default swatch as selected on load.
+    const defaultSw = hitColorRow.querySelector(`.hit-swatch[data-color="${hitColor}"]`);
+    if (defaultSw) defaultSw.classList.add("selected");
+    hitColorRow.addEventListener("click", (e) => {
+      const sw = e.target.closest(".hit-swatch");
+      if (!sw) return;
+      hitColor = sw.dataset.color;
+      hitColorRow.querySelectorAll(".hit-swatch").forEach(s => s.classList.toggle("selected", s === sw));
+      refreshAllHits();
     });
   }
   document.querySelectorAll('input[name="mode"]').forEach(el => el.addEventListener("change", setModeHint));
@@ -119,6 +144,14 @@ async function init() {
       renderTable();
     });
   });
+  const labelAll = document.getElementById("label-all");
+  if (labelAll) {
+    labelAll.addEventListener("change", () => toggleAllOverlay("label", labelAll.checked));
+  }
+  const hitsAll = document.getElementById("hits-all");
+  if (hitsAll) {
+    hitsAll.addEventListener("change", () => toggleAllOverlay("hits", hitsAll.checked));
+  }
 
   if (cities.length) {
     const first = cities[0].id;
@@ -163,6 +196,9 @@ async function loadCity(cityId) {
   // Reset result state
   lastResult = null;
   selectedDistrict = null;
+  clearAllPermLabels();
+  clearAllHits();
+  syncOverlayMasterCheckboxes();
   document.getElementById("results-card").classList.add("hidden");
   document.getElementById("district-panel").classList.add("hidden");
 
@@ -340,7 +376,14 @@ function toggleAll(on) {
 }
 
 function setupMap() {
-  map = L.map("map", { preferCanvas: true }).setView([41.05, 29.0], 10);
+  map = L.map("map", {
+    preferCanvas: true,
+    // Quarter-step zoom on the +/- buttons and scroll wheel — much finer
+    // than Leaflet's default 1.0 jump.
+    zoomSnap: 0.25,
+    zoomDelta: 0.25,
+    wheelPxPerZoomLevel: 120,
+  }).setView([41.05, 29.0], 10);
   // CartoDB Voyager: same low-contrast feel as light_all but with a
   // subtle pale blue for water — gives the map some breathing color
   // without competing with the heatmap overlays.
@@ -352,14 +395,6 @@ function setupMap() {
     // tainting it. CartoDB serves tiles with Access-Control-Allow-Origin: *.
     crossOrigin: "anonymous",
   }).addTo(map);
-  // Labels-only overlay on top of the GeoJSON layer. Built but not added —
-  // the "Map labels" checkbox in Appearance toggles it on demand. Default off.
-  labelsLayer = L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png", {
-    maxZoom: 19,
-    subdomains: "abcd",
-    crossOrigin: "anonymous",
-    pane: "shadowPane",
-  });
 }
 
 function renderDistrictLayer(geo) {
@@ -621,6 +656,10 @@ function runQuery() {
   applyStyling();
   renderLegend();
   renderTable();
+  // Numbers + match_examples just changed — refresh any overlays the user
+  // had pinned for districts that are still in the result set.
+  refreshAllLabels();
+  refreshAllHits();
 }
 
 function renderSummaryStats(s) {
@@ -720,15 +759,21 @@ function renderTable() {
     const bar = greyed ? 0 : Math.max(2, metricValue(r) / Math.max(scaleMax(), 1e-9) * 100);
     const activeCls = selectedDistrict === r.name ? " active" : "";
     const ndCls = greyed ? " nodata" : "";
+    const labelChecked = labeledDistricts.has(r.name) ? " checked" : "";
+    const hitsChecked = hitDistricts.has(r.name) ? " checked" : "";
     return `<tr class="row${activeCls}${ndCls}" data-name="${esc(r.name)}">
       <td>${esc(r.name)}</td>
       <td class="num">${r.matches}</td>
       <td class="num">${r.count}</td>
       <td class="num"><span class="frac-bar"><span style="width:${bar}%;background:${color}"></span></span>${pct}</td>
+      <td class="cb-col"><input type="checkbox" class="row-label-cb"${labelChecked} /></td>
+      <td class="cb-col"><input type="checkbox" class="row-hits-cb"${hitsChecked} /></td>
     </tr>`;
   }).join("");
   tbody.querySelectorAll("tr").forEach(tr => {
-    tr.addEventListener("click", () => {
+    tr.addEventListener("click", (e) => {
+      // Clicks on the per-row checkboxes shouldn't also focus the district.
+      if (e.target.closest("input[type='checkbox']")) return;
       const name = tr.dataset.name;
       selectedDistrict = name;
       showDistrictPanel(name);
@@ -737,7 +782,149 @@ function renderTable() {
       applyStyling();
       renderTable();
     });
+    const lcb = tr.querySelector(".row-label-cb");
+    if (lcb) lcb.addEventListener("change", (e) => {
+      e.stopPropagation();
+      setDistrictLabel(tr.dataset.name, lcb.checked);
+      syncOverlayMasterCheckboxes();
+    });
+    const hcb = tr.querySelector(".row-hits-cb");
+    if (hcb) hcb.addEventListener("change", (e) => {
+      e.stopPropagation();
+      setDistrictHits(tr.dataset.name, hcb.checked);
+      syncOverlayMasterCheckboxes();
+    });
   });
+  syncOverlayMasterCheckboxes();
+}
+
+// ---------------- per-district map overlays ----------------
+
+// Permanent label (district name + metric value) anchored to the polygon
+// center. Only added when the user ticks the row's "label" checkbox.
+function setDistrictLabel(name, on) {
+  if (on) labeledDistricts.add(name); else labeledDistricts.delete(name);
+  refreshDistrictLabel(name);
+}
+
+function refreshDistrictLabel(name) {
+  const existing = permLabelByName[name];
+  if (existing) { map.removeLayer(existing); delete permLabelByName[name]; }
+  if (!labeledDistricts.has(name)) return;
+  const layer = layerByName[name];
+  if (!layer) return;
+  let center;
+  try { center = layer.getBounds().getCenter(); } catch { return; }
+  const tt = L.tooltip({
+    permanent: true,
+    direction: "center",
+    interactive: false,
+    className: "district-perm-label",
+  })
+    .setLatLng(center)
+    .setContent(buildPermLabelHtml(name))
+    .addTo(map);
+  permLabelByName[name] = tt;
+}
+
+function buildPermLabelHtml(name) {
+  const s = lastResult && lastResult.per_district[name];
+  let valStr = "—";
+  if (s && s.count > 0) {
+    valStr = currentMetric === "fraction" ? fmtFrac(s.fraction) : `${s.matches}`;
+  }
+  return `<div class="perm-name">${esc(name)}</div><div class="perm-val">${valStr}</div>`;
+}
+
+function refreshAllLabels() {
+  for (const name of [...labeledDistricts]) refreshDistrictLabel(name);
+}
+
+function clearAllPermLabels() {
+  for (const name of Object.keys(permLabelByName)) {
+    try { map.removeLayer(permLabelByName[name]); } catch {}
+  }
+  permLabelByName = {};
+  labeledDistricts.clear();
+}
+
+// Per-match circle markers for every match_examples entry in the district.
+// Drawn on the SVG renderer so they sit above the canvas-rendered polygons
+// and don't poison district hit-testing (same trick as _matchMarker).
+function setDistrictHits(name, on) {
+  if (on) hitDistricts.add(name); else hitDistricts.delete(name);
+  refreshDistrictHits(name);
+}
+
+function refreshDistrictHits(name) {
+  const existing = hitGroupByName[name];
+  if (existing) { map.removeLayer(existing); delete hitGroupByName[name]; }
+  if (!hitDistricts.has(name)) return;
+  const s = lastResult && lastResult.per_district[name];
+  if (!s) return;
+  const group = L.layerGroup();
+  for (const m of (s.match_examples || [])) {
+    if (typeof m.lat !== "number" || typeof m.lon !== "number") continue;
+    L.circleMarker([m.lat, m.lon], {
+      radius: 3.5,
+      stroke: false,
+      fillColor: hitColor,
+      fillOpacity: hitOpacity,
+      interactive: false,
+      renderer: L.svg(),
+    }).addTo(group);
+  }
+  group.addTo(map);
+  hitGroupByName[name] = group;
+}
+
+function refreshAllHits() {
+  for (const name of [...hitDistricts]) refreshDistrictHits(name);
+}
+
+function clearAllHits() {
+  for (const name of Object.keys(hitGroupByName)) {
+    try { map.removeLayer(hitGroupByName[name]); } catch {}
+  }
+  hitGroupByName = {};
+  hitDistricts.clear();
+}
+
+// Bulk toggle from the master checkbox in the column header. Operates on
+// every district currently in lastResult.per_district (sortable rows).
+function toggleAllOverlay(kind, on) {
+  if (!lastResult) return;
+  const names = Object.keys(lastResult.per_district);
+  if (kind === "label") {
+    if (on) for (const n of names) labeledDistricts.add(n);
+    else clearAllPermLabels();
+    refreshAllLabels();
+  } else if (kind === "hits") {
+    if (on) for (const n of names) hitDistricts.add(n);
+    else clearAllHits();
+    refreshAllHits();
+  }
+  // Reflect in the per-row checkboxes.
+  document.querySelectorAll("#district-table tbody tr").forEach(tr => {
+    const cb = tr.querySelector(kind === "label" ? ".row-label-cb" : ".row-hits-cb");
+    if (cb) cb.checked = on;
+  });
+  syncOverlayMasterCheckboxes();
+}
+
+// Reflect partial / full / empty selection state in the column-header
+// checkboxes (indeterminate when partial).
+function syncOverlayMasterCheckboxes() {
+  const total = lastResult ? Object.keys(lastResult.per_district).length : 0;
+  const setMaster = (id, n) => {
+    const cb = document.getElementById(id);
+    if (!cb) return;
+    if (total === 0) { cb.checked = false; cb.indeterminate = false; return; }
+    cb.checked = n === total;
+    cb.indeterminate = n > 0 && n < total;
+  };
+  setMaster("label-all", labeledDistricts.size);
+  setMaster("hits-all", hitDistricts.size);
 }
 
 // ---------------- district panel ----------------

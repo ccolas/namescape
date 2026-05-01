@@ -40,9 +40,9 @@ body { display: flex; height: 100vh; overflow: hidden; }
 /* ---------------- sidebar ---------------- */
 
 #sidebar {
-  width: 380px;
-  min-width: 340px;
-  max-width: 440px;
+  width: 440px;
+  min-width: 380px;
+  max-width: 500px;
   padding: 18px 18px 24px;
   overflow-y: auto;
   /* Subtle gradient: cool Viridis-ish at top, fading to neutral. Gives
@@ -518,6 +518,32 @@ input[type="checkbox"]:indeterminate::after {
 }
 #district-table th.sort-active.asc::after { content: " ↑"; }
 
+#district-table th.cb-col {
+  cursor: default;
+  text-align: center;
+  padding: 4px 4px;
+  width: 1%;
+}
+#district-table th.cb-col:hover { color: var(--text-soft); }
+#district-table th.cb-col .cb-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  user-select: none;
+}
+#district-table th.cb-col .cb-head input { cursor: pointer; }
+#district-table th.cb-col .cb-head span {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-soft);
+}
+#district-table td.cb-col { text-align: center; padding: 4px; }
+#district-table td.cb-col input { cursor: pointer; vertical-align: middle; }
+
 #district-table td {
   padding: 5px 8px;
   border-bottom: 1px solid var(--border);
@@ -815,6 +841,35 @@ input[type="checkbox"]:indeterminate::after {
   line-height: 1.45;
 }
 .leaflet-tooltip.district-tooltip::before { display: none; }
+
+/* Permanent on-map labels for districts the user has pinned via the
+   "label" checkbox in the results table. Distinct from .district-tooltip
+   (the hover/sticky one) — these stay visible and show name + metric. */
+.leaflet-tooltip.district-perm-label {
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  padding: 3px 7px;
+  font-family: var(--font);
+  font-size: 10.5px;
+  line-height: 1.25;
+  color: var(--text);
+  text-align: center;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+}
+.leaflet-tooltip.district-perm-label::before { display: none; }
+.leaflet-tooltip.district-perm-label .perm-name {
+  font-weight: 600;
+  color: var(--text);
+}
+.leaflet-tooltip.district-perm-label .perm-val {
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
+}
 .leaflet-container { font-family: var(--font); background: #e6eaf1; }
 .leaflet-control-attribution { font-size: 10px; }
 
@@ -848,7 +903,7 @@ input[type="checkbox"]:indeterminate::after {
   position: fixed;
   /* Anchored to the bottom so it doesn't fight Leaflet's top-left zoom controls. */
   bottom: 24px;
-  left: 380px;
+  left: 440px;
   z-index: 1200;
   width: 22px;
   height: 38px;
@@ -930,6 +985,30 @@ body.sidebar-collapsed #sidebar-toggle svg { transform: rotate(180deg); }
   color: var(--text-soft);
   min-width: 32px;
   text-align: right;
+}
+
+/* ---------------- hit color swatches ---------------- */
+
+.hit-color-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.hit-swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--c, #999);
+  cursor: pointer;
+  outline: 1px solid var(--border-strong);
+  transition: transform 0.12s, outline-color 0.12s, outline-width 0.12s;
+}
+.hit-swatch:hover { transform: scale(1.1); }
+.hit-swatch.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* ---------------- export button ---------------- */
