@@ -10,6 +10,8 @@ Place names carry signal. Streets, shops, mosques, parks, government offices —
 
 You give it: a city, a list of keywords, a set of place types to look at (shops, places of worship, government offices, …), and a matching mode. It gives back: a heatmap per district, a sortable table, and clickable district panels that list every matched place name.
 
+This tool ([version](https://github.com/ccolas/namescape/tree/a8dc23f588605428d8e37e00e3927e32293d94c8)) was used in paper *Neo-Ottomanism, Fetih, and the Politics of Belonging in Istanbul* (Aydın 2026).  
+
 ## How matching works, briefly
 
 Each place has a primary name plus optional alternative names (translations, historical names, brand names). The app searches across all of them. Four matching modes: **exact** (whole-word), **substring** (any part of the name), **root** (stem-aware — catches Turkish `kitap` ↔ `kitapçı` ↔ `kitabı`, French `boulanger` ↔ `boulangerie`, etc.), and **regex**. Matching is diacritic-insensitive. There's an exclude list for filtering out false positives (include `kara`, exclude `karaköy` if you don't want the Istanbul neighbourhood name).
@@ -154,6 +156,7 @@ static/
 .fetch_cache/                        per-source raw fetch cache (gitignored)
 requirements.txt
 ```
+
 
 ## Citation
 
