@@ -54,6 +54,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("build")
 
 SITE_DIR = Path(__file__).parent / "site"
+# Default data dir; main() may rebind this to data/<variant>/ when --variant is set.
 DATA_DIR = SITE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -506,7 +507,8 @@ def _cached_fetch(key: str, source: str, fetch_fn, force: bool = False):
 
 def process_city(city: dict, force: bool,
                  sources: Tuple[str, ...] = ("osm", "overture", "fsq"),
-                 refetch: bool = False) -> Optional[dict]:
+                 refetch: bool = False,
+                 dedup: bool = True) -> Optional[dict]:
     out_path = DATA_DIR / f"{city['id']}.json.gz"
     if out_path.exists() and not force:
         log.info("[%s] already built: %s — skipping (use --force to rebuild)",
@@ -612,10 +614,17 @@ def process_city(city: dict, force: bool,
             log.info("    %6d  [%s]  %s", n, src, cat)
 
     # 3) Spatial + name dedup across sources (OSM wins; FSQ over Overture).
-    merged = merge_mod.merge(
-        {"osm": osm_recs, "fsq": fsq_recs, "overture": overture_recs},
-        priority=("osm", "fsq", "overture"),
-    )
+    if dedup:
+        merged = merge_mod.merge(
+            {"osm": osm_recs, "fsq": fsq_recs, "overture": overture_recs},
+            priority=("osm", "fsq", "overture"),
+        )
+    else:
+        merged = list(osm_recs) + list(fsq_recs) + list(overture_recs)
+        log.info("[%s] dedup skipped: %d records concatenated "
+                 "(osm=%d, fsq=%d, overture=%d)",
+                 city["id"], len(merged),
+                 len(osm_recs), len(fsq_recs), len(overture_recs))
 
     # 4) Final pass: PIP to district, build bundle records.
     spec_labels = {s["spec_id"] if "spec_id" in s else _spec_id(s):
@@ -703,7 +712,23 @@ def main() -> int:
     ap.add_argument("--reindex", action="store_true",
                     help="just rewrite data/config.json from existing .json.gz bundles "
                          "(no Overpass / Overture / FSQ calls)")
+    ap.add_argument("--variant", default=None,
+                    help="write outputs to data/<variant>/ instead of data/. "
+                         "Use to keep parallel builds (e.g. --variant overture_only) "
+                         "without overwriting the default bundles.")
+    ap.add_argument("--no-dedup", action="store_true",
+                    help="skip merge.py — concatenate sources as-is, keep duplicates "
+                         "(both cross-source and within-source).")
     args = ap.parse_args()
+
+    # Rebind module-level DATA_DIR if --variant is set so process_city /
+    # write_config / reindex all read+write the variant subdirectory.
+    if args.variant:
+        global DATA_DIR
+        DATA_DIR = SITE_DIR / "data" / args.variant
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        log.info("variant=%s -> writing to %s", args.variant,
+                 DATA_DIR.relative_to(SITE_DIR.parent.parent))
 
     if args.reindex:
         summaries: List[dict] = []
@@ -749,7 +774,8 @@ def main() -> int:
         try:
             summary = process_city(city, args.force,
                                    sources=sources,
-                                   refetch=args.refetch)
+                                   refetch=args.refetch,
+                                   dedup=not args.no_dedup)
         except Exception as e:
             log.exception("[%s] build failed: %s", cid, e)
             continue

@@ -20,7 +20,7 @@ You can color districts by **fraction** (matches as a share of filtered places i
 
 Places of interest (POIs) are merged from up to three open sources: **OpenStreetMap** (the most carefully curated, richest local naming), **Overture Maps Places** (a large, structured aggregation of multiple providers), and optionally **Foursquare OS Places** (the largest, but the noisiest). Cross-source duplicates are deduplicated spatially + by name. District polygons come from OSM administrative relations (or a city open-data portal where OSM is unreliable).
 
-The current build of the live site uses OSM + Overture in Istanbul.
+The current build of the live site uses Overture Maps only (deduped within source) in Istanbul.
 
 ## Caveats
 

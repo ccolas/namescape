@@ -5,6 +5,13 @@
 // records). Running a query is pure in-memory: filter elements by the
 // selected tag specs, apply the keyword/matcher, aggregate per district.
 
+// ---------------- config ----------------
+//
+// Switch between parallel builds produced by `python -m static.build --variant <name>`.
+// Default ("data") loads the OSM+Overture+FSQ bundles. Set e.g. "data/overture_only"
+// to load a variant build sitting in static/site/data/overture_only/.
+const DATA_DIR = "data/overture_only";
+
 // ---------------- state ----------------
 
 let map, districtsLayer;
@@ -47,8 +54,8 @@ async function init() {
   setStatus("Loading site config…", "working");
   let cfg;
   try {
-    cfg = await fetch("data/config.json").then(r => {
-      if (!r.ok) throw new Error(`data/config.json: HTTP ${r.status}`);
+    cfg = await fetch(`${DATA_DIR}/config.json`).then(r => {
+      if (!r.ok) throw new Error(`${DATA_DIR}/config.json: HTTP ${r.status}`);
       return r.json();
     });
   } catch (e) {
@@ -215,7 +222,7 @@ async function fetchCityBundle(cityId) {
   // Prefer the gzipped bundle. Modern browsers decompress via DecompressionStream;
   // if the response headers say Content-Encoding: gzip the browser already
   // decompressed transparently and we can call .json() directly.
-  const gzPath = `data/${cityId}.json.gz`;
+  const gzPath = `${DATA_DIR}/${cityId}.json.gz`;
   const r = await fetch(gzPath);
   if (r.ok) {
     if ((r.headers.get("content-encoding") || "").includes("gzip")) {
@@ -230,7 +237,7 @@ async function fetchCityBundle(cityId) {
     throw new Error("Browser lacks DecompressionStream — please use a modern browser");
   }
   // Legacy fallback: uncompressed bundle.
-  const fallback = await fetch(`data/${cityId}.json`);
+  const fallback = await fetch(`${DATA_DIR}/${cityId}.json`);
   if (!fallback.ok) throw new Error(`bundle not found (HTTP ${r.status} for .gz, ${fallback.status} for .json)`);
   return await fallback.json();
 }
