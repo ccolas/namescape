@@ -550,6 +550,9 @@ def process_city(city: dict, force: bool,
         return None
 
     specs = _ordered_specs()
+    # spec_ids backed by an actual sidebar checkbox. Anything outside this
+    # set is demoted to external=other (Uncategorized) so it stays visible.
+    ui_spec_ids = {_spec_id(s) for s in specs}
     language = city["stemmer_language"]
     bbox = bbox_from_geojson(districts_gj)
 
@@ -571,10 +574,17 @@ def process_city(city: dict, force: bool,
     # entries don't need to be invalidated when the category mapping changes.
     from collections import Counter
     unmapped = Counter()  # raw_cat -> count, scoped per (city, source)
+    demoted = Counter()   # spec_id -> count for mappings absent from tags_config.py
 
     def _assign_spec(r: dict, source: str) -> None:
         raw = (r.get("category") or "").strip()
         sid = _map_external_category(raw)
+        if sid != "external=other" and sid not in ui_spec_ids:
+            # category_map.tsv produced an OSM spec that has no checkbox in
+            # tags_config.py. Demote so the record lives under "Uncategorized"
+            # rather than being unfilterable in the UI.
+            demoted[(source, sid)] += 1
+            sid = "external=other"
         r["spec_id"] = sid
         if sid == "external=other" and raw:
             unmapped[(source, raw)] += 1
@@ -597,6 +607,16 @@ def process_city(city: dict, force: bool,
                 fsq_recs.append(r)
         except Exception as e:
             log.warning("[%s] Foursquare failed (%s) — continuing without it", city["id"], e)
+
+    # Report spec_ids demoted to external=other because tags_config.py has no
+    # checkbox for them. To surface them in the UI instead, add the spec to
+    # static/tags_config.py.
+    if demoted:
+        log.info("[%s] demoted %d records to external=other "
+                 "(spec_id has no checkbox in tags_config.py):",
+                 city["id"], sum(demoted.values()))
+        for (src, sid), n in demoted.most_common(20):
+            log.info("    %6d  [%s]  %s", n, src, sid)
 
     # Dump unmapped categories so the user can extend static/category_map.py.
     if unmapped:
